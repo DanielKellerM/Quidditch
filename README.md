@@ -171,6 +171,7 @@ The parameters for the lowering config are in `QuidditchSnitchAttrs.td`, in `Qui
 
 Shouldn't be anything surprising in here.
 
+
 The Snitch to LLVM covnersion converts operations to LLVM function calls, and the `linalg` to RISC-V just calls to the `xdsl-opt` executable in the virtual environment and stores the result in a `StringAttr`.
 
 The scratch memory is modeled as one big `memref`, the code for which is in `ConvertSnitchToLLVM.cpp`
