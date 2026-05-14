@@ -74,7 +74,7 @@ The compilation process produces a Snitch executable, which can only be run on S
 The Snitch executable can be simulated on the host using the Snitch toolchain's Verilator simulator.
 
 ```shell
-export TARGET_EXE=build/runtime/sampels/nsnet/NsNet2
+export TARGET_EXE=build/runtime/samples/nsnet/NsNet2
 toolchain/bin/snitch_cluster.vlt $TARGET_EXE
 ```
 
