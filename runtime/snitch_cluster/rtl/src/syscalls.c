@@ -2,8 +2,8 @@
 #include <sys/stat.h>
 
 #include "alloc_decls.h"
+#include "quidditch_cluster_defs.h"
 #include "riscv_decls.h"
-#include "snitch_cluster_defs.h"
 #include "team_decls.h"
 
 int close(int fd) { return -1; }

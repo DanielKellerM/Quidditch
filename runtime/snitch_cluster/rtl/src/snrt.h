@@ -7,23 +7,32 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Snitch cluster specific
+#include "snitch_cluster_addrmap.h"
+#include "snitch_cluster_peripheral_addrmap.h"
+#include "snitch_cluster_raw_addrmap.h"
 #include "quidditch_cluster_defs.h"
-#include "snitch_cluster_memory.h"
 
-// Forward declarations
+#include "alloc_decls.h"
+#include "cls_decls.h"
+#include "dma_decls.h"
+#include "memory_decls.h"
 #include "riscv_decls.h"
 #include "start_decls.h"
 #include "sync_decls.h"
 #include "team_decls.h"
 
-// Implementation
+#include "alloc.h"
+#include "alloc_v2.h"
+#include "cls.h"
 #include "cluster_interrupts.h"
 #include "dma.h"
 #include "dump.h"
 #include "perf_cnt.h"
+#include "printf.h"
 #include "riscv.h"
 #include "snitch_cluster_global_interrupts.h"
+#include "snitch_cluster_memory.h"
 #include "ssr.h"
 #include "sync.h"
 #include "team.h"
+#include "types.h"
