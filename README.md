@@ -38,8 +38,8 @@ mkdir toolchain
 docker run --rm ghcr.io/opencompl/quidditch/toolchain:main tar -cC /opt/quidditch-toolchain .\
  | tar -xC ./toolchain
 
-python -m venv venv
-source ./venv/bin/activate
+uv sync
+source ./.venv/bin/activate
 
 mkdir build && cd build
 cmake .. -GNinja \
