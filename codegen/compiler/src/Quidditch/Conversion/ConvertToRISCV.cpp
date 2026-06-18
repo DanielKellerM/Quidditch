@@ -114,10 +114,7 @@ ConvertToRISCV::convertToRISCVAssembly(MemRefMicrokernelOp kernelOp,
       xDSLOptPath,
       {xDSLOptPath, "-p",
        "arith-add-fastmath,"
-       "convert-linalg-to-memref-stream,"
-       "test-optimise-memref-stream," // NOLINT(*-suspicious-missing-comma)
-       "test-lower-memref-stream-to-snitch-stream,"
-       "test-lower-snitch-stream-to-asm",
+       "test-lower-linalg-to-snitch",
        "-t", "riscv-asm"},
       std::nullopt, redirects);
   if (ret != 0) {

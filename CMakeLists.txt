@@ -7,7 +7,7 @@ cmake_path(REMOVE_FILENAME QUIDDITCH_TOOLCHAIN_FILE OUTPUT_VARIABLE QUIDDITCH_TO
 
 if (NOT DEFINED ENV{VIRTUAL_ENV} AND NOT ${OVERRIDE_VENV})
   message(FATAL_ERROR [[
-  Please use a virtual environment as this cmake script will call pip install.
+  Please use a virtual environment as this cmake script will call uv sync.
   Reconfigure with -DOVERRIDE_VENV=ON if this is a false positive or you don't
   care.
 ]])
@@ -16,19 +16,16 @@ endif ()
 
 set(Python3_FIND_VIRTUALENV "FIRST")
 find_package(Python3 REQUIRED)
+find_program(UV_EXECUTABLE NAMES uv REQUIRED)
 execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -m pip install -r ${CMAKE_CURRENT_LIST_DIR}/requirements_frozen.txt
+    COMMAND "${UV_EXECUTABLE}" sync
     WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR} COMMAND_ERROR_IS_FATAL ANY)
 
-# Reconfigure if any of the 'requirements.txt' files changed or we update the xDSL commit.
-# This then reruns 'pip install'.
-# TODO: Could make this a build step instead of a configure step.
-set(python_reqs)
-file(GLOB_RECURSE temp LIST_DIRECTORIES false CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/codegen/requirements.txt)
-list(APPEND python_reqs ${temp})
-file(GLOB_RECURSE temp LIST_DIRECTORIES false CONFIGURE_DEPENDS ${CMAKE_CURRENT_LIST_DIR}/runtime/requirements.txt)
-list(APPEND python_reqs ${temp})
-list(APPEND python_reqs ${CMAKE_CURRENT_LIST_DIR}/.git/modules/xdsl/HEAD)
+# Reconfigure (rerun 'uv sync') when the dependencies or the xDSL commit change.
+set(python_reqs
+    ${CMAKE_CURRENT_LIST_DIR}/pyproject.toml
+    ${CMAKE_CURRENT_LIST_DIR}/uv.lock
+    ${CMAKE_CURRENT_LIST_DIR}/.git/modules/xdsl/HEAD)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${python_reqs})
 
 include(ExternalProject)
