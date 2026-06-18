@@ -339,12 +339,35 @@ static iree_status_t quidditch_command_buffer_update_buffer(
 // iree_hal_command_buffer_copy_buffer
 //===----------------------------------------------------------------------===//
 
+// snRuntime iDMA (internal API — not in snRuntime/api/; symbols in libsnRuntime via
+// the extern-inline in src/dma.c). Phase-4(B) §21: offload HAL buffer copies from
+// scalar memcpy (iree_hal_buffer_map_copy) to the iDMA.
+extern uint32_t snrt_dma_start_1d(void* dst, const void* src, size_t size);
+extern void snrt_dma_wait_all(void);
+
 static iree_status_t quidditch_command_buffer_copy_buffer(
     iree_hal_command_buffer_t* base_command_buffer,
     iree_hal_buffer_ref_t source_ref, iree_hal_buffer_ref_t target_ref) {
-  return iree_hal_buffer_map_copy(source_ref.buffer, source_ref.offset,
-                                  target_ref.buffer, target_ref.offset,
-                                  target_ref.length);
+  // §21 Phase-4(B): iDMA the copy instead of scalar iree_hal_buffer_map_copy.
+  // Heap-allocator buffers are mappable host memory, so map gives direct pointers
+  // and the iDMA does the host->host (L3->L3) move off the scalar core.
+  iree_hal_buffer_mapping_t src_map, dst_map;
+  IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
+      source_ref.buffer, IREE_HAL_MAPPING_MODE_SCOPED,
+      IREE_HAL_MEMORY_ACCESS_READ, source_ref.offset, target_ref.length,
+      &src_map));
+  iree_status_t status = iree_hal_buffer_map_range(
+      target_ref.buffer, IREE_HAL_MAPPING_MODE_SCOPED,
+      IREE_HAL_MEMORY_ACCESS_WRITE, target_ref.offset, target_ref.length,
+      &dst_map);
+  if (iree_status_is_ok(status)) {
+    snrt_dma_start_1d(dst_map.contents.data, src_map.contents.data,
+                      target_ref.length);
+    snrt_dma_wait_all();
+    iree_hal_buffer_unmap_range(&dst_map);
+  }
+  iree_hal_buffer_unmap_range(&src_map);
+  return status;
 }
 
 //===----------------------------------------------------------------------===//
