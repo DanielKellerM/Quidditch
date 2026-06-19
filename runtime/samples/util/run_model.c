@@ -49,7 +49,7 @@ static iree_status_t setup_instance_and_device(
   quidditch_device_params_t params;
   quidditch_device_params_initialize(&params);
   result =
-      quidditch_device_create(IREE_SV("snitch"), &params,
+      quidditch_device_create(IREE_SV("quidditch_device"), &params,
                               /*loader_count=*/1, &loader, device_allocator,
                               host_allocator, out_device);
   iree_hal_executable_loader_release(loader);
