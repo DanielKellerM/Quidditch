@@ -22,9 +22,6 @@ static void quidditch_executable_destroy(
   iree_hal_executable_library_deinitialize_imports(&executable->environment,
                                                    host_allocator);
 
-  for (iree_host_size_t i = 0; i < executable->pipeline_layout_count; ++i) {
-    iree_hal_pipeline_layout_release(executable->pipeline_layouts[i]);
-  }
   iree_allocator_free(host_allocator, executable);
 
   IREE_TRACE_ZONE_END(z0);
@@ -35,21 +32,11 @@ static const iree_hal_executable_vtable_t quidditch_executable_vtable = {
 };
 
 void quidditch_executable_initialize(
-    iree_host_size_t pipeline_layout_count,
-    iree_hal_pipeline_layout_t* const* source_pipeline_layouts,
-    iree_hal_pipeline_layout_t** target_pipeline_layouts,
     iree_allocator_t host_allocator,
     quidditch_executable_t* out_base_executable) {
   iree_hal_resource_initialize(&quidditch_executable_vtable,
                                &out_base_executable->resource);
   out_base_executable->host_allocator = host_allocator;
-
-  out_base_executable->pipeline_layout_count = pipeline_layout_count;
-  out_base_executable->pipeline_layouts = target_pipeline_layouts;
-  for (iree_host_size_t i = 0; i < pipeline_layout_count; ++i) {
-    target_pipeline_layouts[i] = source_pipeline_layouts[i];
-    iree_hal_pipeline_layout_retain(source_pipeline_layouts[i]);
-  }
 
   // Function attributes are optional and populated by the parent type.
   out_base_executable->dispatch_attrs = NULL;
@@ -91,8 +78,6 @@ iree_status_t quidditch_executable_create(
     const iree_hal_executable_import_provider_t import_provider,
     iree_allocator_t host_allocator, iree_hal_executable_t** out_executable) {
   IREE_ASSERT_ARGUMENT(executable_params);
-  IREE_ASSERT_ARGUMENT(!executable_params->pipeline_layout_count ||
-                       executable_params->pipeline_layouts);
   IREE_ASSERT_ARGUMENT(!executable_params->constant_count ||
                        executable_params->constants);
   IREE_ASSERT_ARGUMENT(library_header);
@@ -103,15 +88,11 @@ iree_status_t quidditch_executable_create(
   quidditch_executable_t* executable = NULL;
   iree_host_size_t total_size =
       sizeof(*executable) +
-      executable_params->pipeline_layout_count * sizeof(*executable->layouts) +
       executable_params->constant_count * sizeof(*executable_params->constants);
   iree_status_t status =
       iree_allocator_malloc(host_allocator, total_size, (void**)&executable);
   if (iree_status_is_ok(status)) {
-    quidditch_executable_initialize(executable_params->pipeline_layout_count,
-                                    executable_params->pipeline_layouts,
-                                    &executable->layouts[0], host_allocator,
-                                    executable);
+    quidditch_executable_initialize(host_allocator, executable);
     executable->library.header = library_header;
     executable->is_llvm_cpu_executable = !iree_string_view_equal(
         executable_params->executable_format, IREE_SV("snitch"));
@@ -122,9 +103,7 @@ iree_status_t quidditch_executable_create(
   // Copy executable constants so we own them.
   if (iree_status_is_ok(status) && executable_params->constant_count > 0) {
     uint32_t* target_constants =
-        (uint32_t*)((uint8_t*)executable + sizeof(*executable) +
-                    executable_params->pipeline_layout_count *
-                        sizeof(*executable->layouts));
+        (uint32_t*)((uint8_t*)executable + sizeof(*executable));
     memcpy(target_constants, executable_params->constants,
            executable_params->constant_count *
                sizeof(*executable_params->constants));

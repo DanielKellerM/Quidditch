@@ -5,6 +5,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Program.h"
 
+#include "Quidditch/Dialect/Snitch/IR/QuidditchSnitchAttrs.h"
 #include "Quidditch/Dialect/Snitch/IR/QuidditchSnitchDialect.h"
 #include "Quidditch/Dialect/Snitch/IR/QuidditchSnitchOps.h"
 
@@ -84,6 +85,19 @@ ConvertToRISCV::convertToRISCVAssembly(MemRefMicrokernelOp kernelOp,
 
   builder.create<func::ReturnOp>(kernelOp.getLoc());
 
+  // xDSL does not register Quidditch codegen-metadata attributes (e.g.
+  // 'lowering_config' holding a #quidditch_snitch.lowering_config value, used
+  // only for IREE-side tiling). Strip them from the clone so xdsl-opt can parse
+  // the kernel.
+  tempFuncOp->walk([](Operation *op) {
+    SmallVector<StringRef> toRemove;
+    for (NamedAttribute attr : op->getDiscardableAttrs())
+      if (isa<LoweringConfigAttr>(attr.getValue()))
+        toRemove.push_back(attr.getName());
+    for (StringRef name : toRemove)
+      op->removeDiscardableAttr(name);
+  });
+
   SmallString<64> stdinFile;
   int stdinFd;
   if (llvm::sys::fs::createTemporaryFile("xdsl-in", "mlir", stdinFd, stdinFile))
@@ -114,10 +128,7 @@ ConvertToRISCV::convertToRISCVAssembly(MemRefMicrokernelOp kernelOp,
       xDSLOptPath,
       {xDSLOptPath, "-p",
        "arith-add-fastmath,"
-       "convert-linalg-to-memref-stream,"
-       "test-optimise-memref-stream," // NOLINT(*-suspicious-missing-comma)
-       "test-lower-memref-stream-to-snitch-stream,"
-       "test-lower-snitch-stream-to-asm",
+       "test-lower-linalg-to-snitch",
        "-t", "riscv-asm"},
       std::nullopt, redirects);
   if (ret != 0) {

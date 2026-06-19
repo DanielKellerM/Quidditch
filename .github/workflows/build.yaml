@@ -33,9 +33,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: 3.11
-          cache: 'pip'
-          cache-dependency-path: |
-            ./requirements_frozen.txt
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            ./pyproject.toml
+            ./uv.lock
             ./.git/modules/xdsl/HEAD
 
       - name: Install minimum required cmake and ninja

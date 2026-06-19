@@ -58,7 +58,7 @@ LogicalResult StartTensorCopyOp::verify() {
       return emitOpError("expected padding number for every dimension");
 
   unsigned numDynamicPads = llvm::count(
-      getStaticHighPad().value_or(std::nullopt), ShapedType::kDynamic);
+      getStaticHighPad().value_or(ArrayRef<int64_t>{}), ShapedType::kDynamic);
   if (numDynamicPads != getHighPad().size())
     return emitOpError("expected ")
            << numDynamicPads << " dynamic padding values";
@@ -142,14 +142,21 @@ std::optional<bool> StartTensorCopyOp::elidesAllocation(
   if (hasPadding())
     return false;
 
-  FailureOr<BaseMemRefType> copyType =
-      invocationStack
-          ? bufferization::getBufferType(getCopy(), options, *invocationStack)
-          : bufferization::getBufferType(getCopy(), options);
+  bufferization::BufferizationState bufferizationState;
+  FailureOr<BufferLikeType> copyType =
+      invocationStack ? bufferization::getBufferType(getCopy(), options,
+                                                     bufferizationState,
+                                                     *invocationStack)
+                      : bufferization::getBufferType(getCopy(), options,
+                                                     bufferizationState);
   if (failed(copyType))
     return std::nullopt;
 
-  return copyType->getMemorySpace() == getMemorySpaceAttr();
+  auto copyMemRefType = bufferization::detail::asMemRefType(copyType);
+  if (failed(copyMemRefType))
+    return std::nullopt;
+
+  return copyMemRefType->getMemorySpace() == getMemorySpaceAttr();
 }
 
 bool StartTensorCopyOp::resultBufferizesToMemoryWrite(
@@ -214,38 +221,41 @@ bool StartTensorCopyOp::bufferizesToAllocation(Value value) {
   return true;
 }
 
-FailureOr<BaseMemRefType>
+FailureOr<BufferLikeType>
 StartTensorCopyOp::getBufferType(Value value,
                                  const BufferizationOptions &options,
+                                 const BufferizationState &state,
                                  SmallVector<Value> &invocationStack) {
   assert(value == getResult() && "have only one result");
 
   bool contained = llvm::is_contained(invocationStack, value);
   if (!contained)
     if (elidesAllocation(options, &invocationStack) == true)
-      return bufferization::getBufferType(getCopy(), options, invocationStack);
+      return bufferization::getBufferType(getCopy(), options, state,
+                                          invocationStack);
 
   // Unless contained in the invocation stack (where we are free to impose the
   // most optimal layout), we do not really impose a specific layout on the
   // result. Contiguous is a good bet for now.
-  return getMemRefTypeWithStaticIdentityLayout(getResult().getType(),
-                                               getMemorySpaceAttr());
+  return cast<BufferLikeType>(getMemRefTypeWithStaticIdentityLayout(
+      getResult().getType(), getMemorySpaceAttr()));
 }
 
 LogicalResult
 StartTensorCopyOp::bufferize(RewriterBase &rewriter,
-                             const BufferizationOptions &options) {
+                             const BufferizationOptions &options,
+                             BufferizationState &state) {
   if (use_empty()) {
     rewriter.eraseOp(*this);
     return success();
   }
 
-  FailureOr<BaseMemRefType> copyType =
-      bufferization::getBufferType(getCopy(), options);
+  FailureOr<BaseMemRefType> copyType = bufferization::detail::asMemRefType(
+      bufferization::getBufferType(getCopy(), options, state));
   if (failed(copyType))
     return failure();
 
-  FailureOr<Value> copyBuffer = getBuffer(rewriter, getCopy(), options);
+  FailureOr<Value> copyBuffer = getBuffer(rewriter, getCopy(), options, state);
   if (failed(copyBuffer))
     return failure();
 
@@ -260,8 +270,8 @@ StartTensorCopyOp::bufferize(RewriterBase &rewriter,
     return success();
   }
 
-  FailureOr<BaseMemRefType> allocType =
-      bufferization::getBufferType(getResult(), options);
+  FailureOr<BaseMemRefType> allocType = bufferization::detail::asMemRefType(
+      bufferization::getBufferType(getResult(), options, state));
   if (failed(allocType))
     return failure();
 
@@ -373,9 +383,10 @@ AliasingValueList WaitForTensorCopyOp::getAliasingValues(
 
 LogicalResult
 WaitForTensorCopyOp::bufferize(RewriterBase &rewriter,
-                               const BufferizationOptions &options) {
+                               const BufferizationOptions &options,
+                               BufferizationState &state) {
   FailureOr<Value> transferTensorBuffer =
-      getBuffer(rewriter, getTransferTensor(), options);
+      getBuffer(rewriter, getTransferTensor(), options, state);
   if (failed(transferTensorBuffer))
     return failure();
 

@@ -16,7 +16,6 @@
 #include "iree/base/internal/fpu_state.h"
 #include "iree/base/internal/math.h"
 #include "iree/hal/local/executable_library.h"
-#include "iree/hal/local/local_pipeline_layout.h"
 
 //===----------------------------------------------------------------------===//
 // quidditch_command_buffer_t, fork of iree_hal_inline_command_buffer_t.
@@ -28,33 +27,14 @@ typedef struct quidditch_command_buffer_t {
   iree_allocator_t host_allocator;
 
   struct {
-    // A flattened list of all available descriptor set bindings.
-    // As descriptor sets are pushed/bound the bindings will be updated to
-    // represent the fully-translated binding data pointer.
-    //
-    // TODO(benvanik): support proper mapping semantics and track the
-    // iree_hal_buffer_mapping_t and map/unmap where appropriate.
-    void* full_bindings[IREE_HAL_LOCAL_MAX_DESCRIPTOR_SET_COUNT *
-                        IREE_HAL_LOCAL_MAX_DESCRIPTOR_BINDING_COUNT];
-    size_t full_binding_lengths[IREE_HAL_LOCAL_MAX_DESCRIPTOR_SET_COUNT *
-                                IREE_HAL_LOCAL_MAX_DESCRIPTOR_BINDING_COUNT];
-
-    // Packed bindings scratch space used during dispatch. Executable bindings
-    // are packed into a dense list with unused bindings removed.
-    void* packed_bindings[IREE_HAL_LOCAL_MAX_DESCRIPTOR_SET_COUNT *
-                          IREE_HAL_LOCAL_MAX_DESCRIPTOR_BINDING_COUNT];
-    size_t packed_binding_lengths[IREE_HAL_LOCAL_MAX_DESCRIPTOR_SET_COUNT *
-                                  IREE_HAL_LOCAL_MAX_DESCRIPTOR_BINDING_COUNT];
-
-    // All available push constants updated each time push_constants is called.
-    // Reset only with the command buffer and otherwise will maintain its values
-    // during recording to allow for partial push_constants updates.
-    uint32_t push_constants[IREE_HAL_LOCAL_MAX_PUSH_CONSTANT_COUNT];
-
     // Cached and initialized dispatch state reused for all dispatches.
     // Individual dispatches must populate the dynamically changing fields like
-    // push_constant_count and binding_count.
+    // constant_count and binding_count.
     iree_alignas(64) iree_hal_executable_dispatch_state_v0_t dispatch_state;
+    // Persistent storage for binding pointers used by dispatch_state.
+    void* binding_ptr_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
+    // Persistent storage for binding lengths used by dispatch_state.
+    size_t binding_length_storage[IREE_HAL_EXECUTABLE_MAX_BINDING_COUNT];
 
     // An opaque tag used to reduce the cost of processor ID queries.
     iree_cpu_processor_tag_t processor_tag;
@@ -78,14 +58,15 @@ static void quidditch_command_buffer_reset(
   // Setup the cached dispatch state pointers that don't change.
   iree_hal_executable_dispatch_state_v0_t* dispatch_state =
       &command_buffer->state.dispatch_state;
-  dispatch_state->push_constants = command_buffer->state.push_constants;
-  dispatch_state->binding_ptrs = command_buffer->state.packed_bindings;
+  dispatch_state->binding_ptrs = command_buffer->state.binding_ptr_storage;
   dispatch_state->binding_lengths =
-      command_buffer->state.packed_binding_lengths;
+      command_buffer->state.binding_length_storage;
 }
 
-iree_host_size_t quidditch_command_buffer_size(void) {
-  return sizeof(quidditch_command_buffer_t);
+iree_host_size_t quidditch_command_buffer_size(
+    iree_hal_command_buffer_mode_t mode, iree_host_size_t binding_capacity) {
+  return sizeof(quidditch_command_buffer_t) +
+         iree_hal_command_buffer_validation_state_size(mode, binding_capacity);
 }
 
 iree_status_t quidditch_command_buffer_initialize(
@@ -113,7 +94,8 @@ iree_status_t quidditch_command_buffer_initialize(
         IREE_STATUS_INVALID_ARGUMENT,
         "indirect command buffers do not support binding tables");
   }
-  if (storage.data_length < quidditch_command_buffer_size()) {
+  if (storage.data_length <
+      quidditch_command_buffer_size(mode, binding_capacity)) {
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "storage must have at least the capacity as "
                             "defined by quidditch_command_buffer_size");
@@ -158,13 +140,15 @@ iree_status_t quidditch_command_buffer_create(
 
   uint8_t* storage = NULL;
   iree_status_t status = iree_allocator_malloc(
-      host_allocator, quidditch_command_buffer_size(), (void**)&storage);
+      host_allocator, quidditch_command_buffer_size(mode, binding_capacity),
+      (void**)&storage);
   iree_hal_command_buffer_t* command_buffer = NULL;
   if (iree_status_is_ok(status)) {
     status = quidditch_command_buffer_initialize(
         device, mode, command_categories, queue_affinity, binding_capacity,
         host_allocator,
-        iree_make_byte_span(storage, quidditch_command_buffer_size()),
+        iree_make_byte_span(
+            storage, quidditch_command_buffer_size(mode, binding_capacity)),
         &command_buffer);
   }
 
@@ -230,16 +214,18 @@ static iree_status_t quidditch_command_buffer_end(
 // quidditch_command_buffer_t debug utilities
 //===----------------------------------------------------------------------===//
 
-static void quidditch_command_buffer_begin_debug_group(
+static iree_status_t quidditch_command_buffer_begin_debug_group(
     iree_hal_command_buffer_t* base_command_buffer, iree_string_view_t label,
     iree_hal_label_color_t label_color,
     const iree_hal_label_location_t* location) {
   // TODO(benvanik): tracy event stack.
+  return iree_ok_status();
 }
 
-static void quidditch_command_buffer_end_debug_group(
+static iree_status_t quidditch_command_buffer_end_debug_group(
     iree_hal_command_buffer_t* base_command_buffer) {
   // TODO(benvanik): tracy event stack.
+  return iree_ok_status();
 }
 
 //===----------------------------------------------------------------------===//
@@ -299,12 +285,13 @@ static iree_status_t quidditch_command_buffer_wait_events(
 }
 
 //===----------------------------------------------------------------------===//
-// iree_hal_command_buffer_discard_buffer
+// iree_hal_command_buffer_advise_buffer
 //===----------------------------------------------------------------------===//
 
-static iree_status_t quidditch_command_buffer_discard_buffer(
+static iree_status_t quidditch_command_buffer_advise_buffer(
     iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_buffer_ref_t buffer) {
+    iree_hal_buffer_ref_t buffer_ref, iree_hal_memory_advise_flags_t flags,
+    uint64_t arg0, uint64_t arg1) {
   // Could be treated as a cache invalidation as it indicates we won't be using
   // the existing buffer contents again.
   return iree_ok_status();
@@ -316,11 +303,10 @@ static iree_status_t quidditch_command_buffer_discard_buffer(
 
 static iree_status_t quidditch_command_buffer_fill_buffer(
     iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_buffer_ref_t target_buffer, const void* pattern,
-    iree_host_size_t pattern_length) {
-  return iree_hal_buffer_map_fill(target_buffer.buffer, target_buffer.offset,
-                                  target_buffer.length, pattern,
-                                  pattern_length);
+    iree_hal_buffer_ref_t target_ref, const void* pattern,
+    iree_host_size_t pattern_length, iree_hal_fill_flags_t flags) {
+  return iree_hal_buffer_map_fill(target_ref.buffer, target_ref.offset,
+                                  target_ref.length, pattern, pattern_length);
 }
 
 //===----------------------------------------------------------------------===//
@@ -329,22 +315,47 @@ static iree_status_t quidditch_command_buffer_fill_buffer(
 
 static iree_status_t quidditch_command_buffer_update_buffer(
     iree_hal_command_buffer_t* base_command_buffer, const void* source_buffer,
-    iree_host_size_t source_offset, iree_hal_buffer_ref_t target_buffer) {
+    iree_host_size_t source_offset, iree_hal_buffer_ref_t target_ref,
+    iree_hal_update_flags_t flags) {
   return iree_hal_buffer_map_write(
-      target_buffer.buffer, target_buffer.offset,
-      (const uint8_t*)source_buffer + source_offset, target_buffer.length);
+      target_ref.buffer, target_ref.offset,
+      (const uint8_t*)source_buffer + source_offset, target_ref.length);
 }
 
 //===----------------------------------------------------------------------===//
 // iree_hal_command_buffer_copy_buffer
 //===----------------------------------------------------------------------===//
 
+// snRuntime iDMA (internal API — not in snRuntime/api/; symbols in libsnRuntime via
+// the extern-inline in src/dma.c). Phase-4(B) §21: offload HAL buffer copies from
+// scalar memcpy (iree_hal_buffer_map_copy) to the iDMA.
+extern uint32_t snrt_dma_start_1d(void* dst, const void* src, size_t size);
+extern void snrt_dma_wait_all(void);
+
 static iree_status_t quidditch_command_buffer_copy_buffer(
     iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_buffer_ref_t source_ref, iree_hal_buffer_ref_t target_ref) {
-  return iree_hal_buffer_map_copy(source_ref.buffer, source_ref.offset,
-                                  target_ref.buffer, target_ref.offset,
-                                  target_ref.length);
+    iree_hal_buffer_ref_t source_ref, iree_hal_buffer_ref_t target_ref,
+    iree_hal_copy_flags_t flags) {
+  // §21 Phase-4(B): iDMA the copy instead of scalar iree_hal_buffer_map_copy.
+  // Heap-allocator buffers are mappable host memory, so map gives direct pointers
+  // and the iDMA does the host->host (L3->L3) move off the scalar core.
+  iree_hal_buffer_mapping_t src_map, dst_map;
+  IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
+      source_ref.buffer, IREE_HAL_MAPPING_MODE_SCOPED,
+      IREE_HAL_MEMORY_ACCESS_READ, source_ref.offset, target_ref.length,
+      &src_map));
+  iree_status_t status = iree_hal_buffer_map_range(
+      target_ref.buffer, IREE_HAL_MAPPING_MODE_SCOPED,
+      IREE_HAL_MEMORY_ACCESS_WRITE, target_ref.offset, target_ref.length,
+      &dst_map);
+  if (iree_status_is_ok(status)) {
+    snrt_dma_start_1d(dst_map.contents.data, src_map.contents.data,
+                      target_ref.length);
+    snrt_dma_wait_all();
+    iree_hal_buffer_unmap_range(&dst_map);
+  }
+  iree_hal_buffer_unmap_range(&src_map);
+  return status;
 }
 
 //===----------------------------------------------------------------------===//
@@ -361,76 +372,6 @@ static iree_status_t quidditch_command_buffer_collective(
 }
 
 //===----------------------------------------------------------------------===//
-// iree_hal_command_buffer_push_constants
-//===----------------------------------------------------------------------===//
-// NOTE: command buffer state change only; enqueues no tasks.
-
-static iree_status_t quidditch_command_buffer_push_constants(
-    iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_pipeline_layout_t* pipeline_layout, iree_host_size_t offset,
-    const void* values, iree_host_size_t values_length) {
-  quidditch_command_buffer_t* command_buffer =
-      quidditch_command_buffer_cast(base_command_buffer);
-
-  if (IREE_UNLIKELY(offset + values_length >=
-                    sizeof(command_buffer->state.push_constants))) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "push constant range %" PRIhsz " (length=%" PRIhsz
-                            ") out of range",
-                            offset, values_length);
-  }
-
-  memcpy((uint8_t*)&command_buffer->state.push_constants + offset, values,
-         values_length);
-
-  return iree_ok_status();
-}
-
-//===----------------------------------------------------------------------===//
-// iree_hal_command_buffer_push_descriptor_set
-//===----------------------------------------------------------------------===//
-// NOTE: command buffer state change only; enqueues no tasks.
-
-static iree_status_t quidditch_command_buffer_push_descriptor_set(
-    iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_pipeline_layout_t* pipeline_layout, uint32_t set,
-    iree_host_size_t binding_count, const iree_hal_buffer_ref_t* bindings) {
-  quidditch_command_buffer_t* command_buffer =
-      quidditch_command_buffer_cast(base_command_buffer);
-
-  if (IREE_UNLIKELY(set >= IREE_HAL_LOCAL_MAX_DESCRIPTOR_SET_COUNT)) {
-    return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                            "set %u out of bounds", set);
-  }
-
-  iree_host_size_t binding_base =
-      set * IREE_HAL_LOCAL_MAX_DESCRIPTOR_BINDING_COUNT;
-  for (iree_host_size_t i = 0; i < binding_count; ++i) {
-    if (IREE_UNLIKELY(bindings[i].ordinal >=
-                      IREE_HAL_LOCAL_MAX_DESCRIPTOR_BINDING_COUNT)) {
-      return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
-                              "buffer binding index out of bounds");
-    }
-    iree_host_size_t binding_ordinal = binding_base + bindings[i].ordinal;
-
-    // TODO(benvanik): track mapping so we can properly map/unmap/flush/etc.
-    iree_hal_buffer_mapping_t buffer_mapping = {{0}};
-    if (bindings[i].buffer) {
-      IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
-          bindings[i].buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
-          IREE_HAL_MEMORY_ACCESS_ANY, bindings[i].offset, bindings[i].length,
-          &buffer_mapping));
-    }
-    command_buffer->state.full_bindings[binding_ordinal] =
-        buffer_mapping.contents.data;
-    command_buffer->state.full_binding_lengths[binding_ordinal] =
-        buffer_mapping.contents.data_length;
-  }
-
-  return iree_ok_status();
-}
-
-//===----------------------------------------------------------------------===//
 // iree_hal_command_buffer_dispatch
 //===----------------------------------------------------------------------===//
 
@@ -438,27 +379,31 @@ static iree_status_t quidditch_command_buffer_push_descriptor_set(
 
 static iree_status_t quidditch_command_buffer_dispatch(
     iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_executable_t* executable, int32_t entry_point,
-    uint32_t workgroup_x, uint32_t workgroup_y, uint32_t workgroup_z) {
+    iree_hal_executable_t* executable,
+    iree_hal_executable_export_ordinal_t export_ordinal,
+    const iree_hal_dispatch_config_t config, iree_const_byte_span_t constants,
+    iree_hal_buffer_ref_list_t bindings, iree_hal_dispatch_flags_t flags) {
   quidditch_command_buffer_t* command_buffer =
       quidditch_command_buffer_cast(base_command_buffer);
 
-  quidditch_executable_t* local_executable =
-      quidditch_executable_cast(executable);
-  if (IREE_UNLIKELY(!local_executable->pipeline_layouts)) {
-    return iree_make_status(
-        IREE_STATUS_FAILED_PRECONDITION,
-        "layouts not provided during executable creation; cannot dispatch");
+  // TODO(benvanik): support here; should be easy as we just either pass in the
+  // constants or dereference the indirect buffer.
+  if (iree_hal_dispatch_uses_custom_arguments(flags)) {
+    return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                            "direct/indirect arguments are not supported on "
+                            "the inline Snitch command buffer");
   }
 
-  iree_hal_local_pipeline_layout_t* local_layout =
-      (iree_hal_local_pipeline_layout_t*)
-          local_executable->pipeline_layouts[entry_point];
-  iree_host_size_t local_memory_size =
-      local_executable->dispatch_attrs
-          ? local_executable->dispatch_attrs[entry_point].local_memory_pages *
-                IREE_HAL_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE
-          : 0;
+  quidditch_executable_t* local_executable =
+      quidditch_executable_cast(executable);
+
+  // Dispatch attrs are always present after validation.
+  iree_hal_executable_dispatch_attrs_v0_t dispatch_attrs =
+      local_executable->dispatch_attrs[export_ordinal];
+  const iree_host_size_t local_memory_size =
+      dispatch_attrs.local_memory_pages *
+          IREE_HAL_EXECUTABLE_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE +
+      config.dynamic_workgroup_local_memory;
 
   // Update the ID of the processor we are running on.
   // We don't know how much time has passed since we last updated as we are
@@ -471,47 +416,75 @@ static iree_status_t quidditch_command_buffer_dispatch(
       &command_buffer->state.dispatch_state;
 
   // TODO(benvanik): expose on API or keep fixed on executable.
-  dispatch_state->workgroup_size_x = 1;
-  dispatch_state->workgroup_size_y = 1;
-  dispatch_state->workgroup_size_z = 1;
-  dispatch_state->workgroup_count_x = workgroup_x;
-  dispatch_state->workgroup_count_y = workgroup_y;
-  dispatch_state->workgroup_count_z = workgroup_z;
+  dispatch_state->workgroup_size_x =
+      config.workgroup_size[0] ? config.workgroup_size[0] : 1;
+  dispatch_state->workgroup_size_y =
+      config.workgroup_size[1] ? config.workgroup_size[1] : 1;
+  dispatch_state->workgroup_size_z =
+      config.workgroup_size[2] ? config.workgroup_size[2] : 1;
+  if (iree_hal_dispatch_uses_indirect_parameters(flags)) {
+    // TODO(benvanik): track mapping so we can properly map/unmap/flush/etc.
+    iree_hal_buffer_mapping_t buffer_mapping = {{0}};
+    IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
+        config.workgroup_count_ref.buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
+        IREE_HAL_MEMORY_ACCESS_READ, config.workgroup_count_ref.offset,
+        3 * sizeof(uint32_t), &buffer_mapping));
+    memcpy(&dispatch_state->workgroup_count_x, buffer_mapping.contents.data,
+           sizeof(uint32_t) * 3);
+  } else {
+    dispatch_state->workgroup_count_x = config.workgroup_count[0];
+    dispatch_state->workgroup_count_y = config.workgroup_count[1];
+    dispatch_state->workgroup_count_z = config.workgroup_count[2];
+  }
 
   dispatch_state->max_concurrency = snrt_cluster_compute_core_num();
 
-  // Push constants are pulled directly from the command buffer state, but we
-  // only allow the dispatch to read what we know is initialized based on the
-  // layout.
-  dispatch_state->push_constant_count = local_layout->push_constants;
+  // Push constants are pulled directly from the args. Note that we require 4
+  // byte alignment and if the input buffer is not aligned we have to fail.
+  if (IREE_UNLIKELY((constants.data_length % sizeof(uint32_t)) != 0)) {
+    return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
+                            "constants must be 4-byte aligned");
+  } else if (IREE_UNLIKELY(constants.data_length !=
+                           dispatch_attrs.constant_count * sizeof(uint32_t))) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "constant count mismatch, expected %u but was provided %" PRIhsz,
+        (uint32_t)dispatch_attrs.constant_count,
+        constants.data_length / sizeof(uint32_t));
+  }
+  dispatch_state->constant_count = dispatch_attrs.constant_count;
+  dispatch_state->constants = (const uint32_t*)constants.data;
 
   // Produce the dense binding list based on the declared bindings used.
-  // This allows us to change the descriptor sets and bindings counts supported
-  // in the HAL independent of any executable as each executable just gets the
-  // flat dense list and doesn't care about our descriptor set stuff.
   //
   // Note that we are just directly setting the binding data pointers here with
   // no ownership/retaining/etc - it's part of the HAL contract that buffers are
   // kept valid for the duration they may be in use.
-  iree_hal_local_binding_mask_t used_binding_mask = local_layout->used_bindings;
-  iree_host_size_t used_binding_count =
-      iree_math_count_ones_u64(used_binding_mask);
-  dispatch_state->binding_count = used_binding_count;
-  void** binding_ptrs = (void**)dispatch_state->binding_ptrs;
-  size_t* binding_lengths = (size_t*)dispatch_state->binding_lengths;
-  iree_host_size_t binding_base = 0;
-  for (iree_host_size_t i = 0; i < used_binding_count; ++i) {
-    int mask_offset = iree_math_count_trailing_zeros_u64(used_binding_mask);
-    int binding_ordinal = binding_base + mask_offset;
-    binding_base += mask_offset + 1;
-    used_binding_mask = iree_shr(used_binding_mask, mask_offset + 1);
-    binding_ptrs[i] = command_buffer->state.full_bindings[binding_ordinal];
-    if (!binding_ptrs[i]) {
-      return iree_make_status(IREE_STATUS_FAILED_PRECONDITION,
-                              "(flat) binding %d is NULL", binding_ordinal);
+  if (IREE_UNLIKELY(bindings.count != dispatch_attrs.binding_count)) {
+    return iree_make_status(
+        IREE_STATUS_INVALID_ARGUMENT,
+        "binding count mismatch, expected %u but was provided %" PRIhsz,
+        (uint32_t)dispatch_attrs.binding_count, bindings.count);
+  }
+  dispatch_state->binding_count = bindings.count;
+  for (iree_host_size_t i = 0; i < bindings.count; ++i) {
+    // TODO(benvanik): track mapping so we can properly map/unmap/flush/etc.
+    iree_hal_buffer_mapping_t buffer_mapping = {{0}};
+    if (IREE_LIKELY(bindings.values[i].buffer)) {
+      IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
+          bindings.values[i].buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
+          IREE_HAL_MEMORY_ACCESS_ANY, bindings.values[i].offset,
+          bindings.values[i].length, &buffer_mapping));
+    } else {
+      return iree_make_status(
+          IREE_STATUS_FAILED_PRECONDITION,
+          "required binding %" PRIhsz
+          " is NULL; all bindings must have a valid pointer",
+          i);
     }
-    binding_lengths[i] =
-        command_buffer->state.full_binding_lengths[binding_ordinal];
+    command_buffer->state.binding_ptr_storage[i] = buffer_mapping.contents.data;
+    command_buffer->state.binding_length_storage[i] =
+        buffer_mapping.contents.data_length;
   }
 
   // TODO(benvanik): plumb through an arena or fixed-size reservation to use.
@@ -533,7 +506,7 @@ static iree_status_t quidditch_command_buffer_dispatch(
   iree_fpu_state_t fpu_state =
       iree_fpu_state_push(IREE_FPU_STATE_FLAG_FLUSH_DENORMALS_TO_ZERO);
   iree_status_t status = quidditch_executable_issue_dispatch_inline(
-      local_executable, entry_point, dispatch_state,
+      local_executable, export_ordinal, dispatch_state,
       command_buffer->state.processor_id, local_memory);
   iree_fpu_state_pop(fpu_state);
 
@@ -541,32 +514,6 @@ static iree_status_t quidditch_command_buffer_dispatch(
     iree_allocator_free(command_buffer->host_allocator, local_memory.data);
   }
   return status;
-}
-
-typedef union iree_hal_vec3_t {
-  struct {
-    uint32_t x;
-    uint32_t y;
-    uint32_t z;
-  };
-  uint32_t value[3];
-} iree_hal_vec3_t;
-
-static iree_status_t quidditch_command_buffer_dispatch_indirect(
-    iree_hal_command_buffer_t* base_command_buffer,
-    iree_hal_executable_t* executable, int32_t entry_point,
-    iree_hal_buffer_ref_t workgroups_ref) {
-  // TODO(benvanik): track mapping so we can properly map/unmap/flush/etc.
-  iree_hal_buffer_mapping_t buffer_mapping = {{0}};
-  IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
-      workgroups_ref.buffer, IREE_HAL_MAPPING_MODE_PERSISTENT,
-      IREE_HAL_MEMORY_ACCESS_READ, workgroups_ref.offset, 3 * sizeof(uint32_t),
-      &buffer_mapping));
-  iree_hal_vec3_t workgroup_count =
-      *(const iree_hal_vec3_t*)buffer_mapping.contents.data;
-  return quidditch_command_buffer_dispatch(
-      base_command_buffer, executable, entry_point, workgroup_count.x,
-      workgroup_count.y, workgroup_count.z);
 }
 
 //===----------------------------------------------------------------------===//
@@ -584,13 +531,10 @@ static const iree_hal_command_buffer_vtable_t quidditch_command_buffer_vtable =
         .signal_event = quidditch_command_buffer_signal_event,
         .reset_event = quidditch_command_buffer_reset_event,
         .wait_events = quidditch_command_buffer_wait_events,
-        .discard_buffer = quidditch_command_buffer_discard_buffer,
+        .advise_buffer = quidditch_command_buffer_advise_buffer,
         .fill_buffer = quidditch_command_buffer_fill_buffer,
         .update_buffer = quidditch_command_buffer_update_buffer,
         .copy_buffer = quidditch_command_buffer_copy_buffer,
         .collective = quidditch_command_buffer_collective,
-        .push_constants = quidditch_command_buffer_push_constants,
-        .push_descriptor_set = quidditch_command_buffer_push_descriptor_set,
         .dispatch = quidditch_command_buffer_dispatch,
-        .dispatch_indirect = quidditch_command_buffer_dispatch_indirect,
 };

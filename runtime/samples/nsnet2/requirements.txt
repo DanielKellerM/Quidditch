@@ -1,2 +1,0 @@
-torch==2.3.0
-iree-turbine==2.3.0

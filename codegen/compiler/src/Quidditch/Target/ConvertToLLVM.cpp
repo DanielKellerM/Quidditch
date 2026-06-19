@@ -9,7 +9,6 @@
 #include "Quidditch/Dialect/Snitch/IR/QuidditchSnitchDialect.h"
 #include "Quidditch/Dialect/SnitchDMA/IR/SnitchDMADialect.h"
 #include "iree/compiler/Codegen/LLVMCPU/DispatchABI.h"
-#include "iree/compiler/Codegen/LLVMCPU/PassDetail.h"
 #include "iree/compiler/Codegen/LLVMCPU/Passes.h"
 #include "iree/compiler/Codegen/LLVMCPU/Utils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
@@ -23,6 +22,7 @@
 #include "llvm/TargetParser/Triple.h"
 #include "mlir/Analysis/DataLayoutAnalysis.h"
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ArmNeon2dToIntr/ArmNeon2dToIntr.h"
 #include "mlir/Conversion/ArmSMEToLLVM/ArmSMEToLLVM.h"
@@ -286,7 +286,7 @@ struct ConvertHALInterfaceConstantLoadOp
   matchAndRewrite(IREE::HAL::InterfaceConstantLoadOp loadOp,
                   IREE::HAL::InterfaceConstantLoadOpAdaptor operands,
                   ConversionPatternRewriter &rewriter) const override {
-    int64_t index = loadOp.getIndex().getZExtValue();
+    int64_t index = loadOp.getOrdinal().getZExtValue();
     auto resultType =
         typeConverter->convertType(loadOp->getResult(0).getType());
     rewriter.replaceOp(
@@ -348,9 +348,9 @@ acquireInstrumentationEntry(Location loc, Value buffer, Value bufferPtr,
   Value offsetIndex =
       builder.create<LLVM::ConstantOp>(loc, i64Type, headOffset);
   auto i8Type = builder.getI8Type();
-  Value offsetPtr = builder.create<LLVM::GEPOp>(loc, basePtr.getType(), i8Type,
-                                                basePtr, offsetIndex,
-                                                /*inbounds=*/true);
+  Value offsetPtr = builder.create<LLVM::GEPOp>(
+      loc, basePtr.getType(), i8Type, basePtr, offsetIndex,
+      /*noWrapFlags=*/LLVM::GEPNoWrapFlags::inbounds);
   Value rawOffset = builder.create<LLVM::AtomicRMWOp>(
       loc, LLVM::AtomicBinOp::add, offsetPtr, entrySize,
       LLVM::AtomicOrdering::monotonic);
@@ -610,8 +610,8 @@ struct ConvertHALInstrumentMemoryLoadOp
             (loadSize << 8) | IREE_INSTRUMENT_DISPATCH_TYPE_MEMORY_LOAD));
 
     Value loadPtr = getStridedElementPtr(
-        loc, llvm::cast<MemRefType>(instrumentOp.getBase().getType()),
-        operands.getBase(), operands.getIndices(), rewriter);
+        rewriter, loc, llvm::cast<MemRefType>(instrumentOp.getBase().getType()),
+        operands.getBase(), operands.getIndices());
     Value addressI64 = rewriter.create<LLVM::PtrToIntOp>(loc, i64Type, loadPtr);
 
     appendInstrumentationEntry(loc, instrumentOp.getBuffer(),
@@ -657,8 +657,8 @@ struct ConvertHALInstrumentMemoryStoreOp
             (storeSize << 8) | IREE_INSTRUMENT_DISPATCH_TYPE_MEMORY_STORE));
 
     Value storePtr = getStridedElementPtr(
-        loc, llvm::cast<MemRefType>(instrumentOp.getBase().getType()),
-        operands.getBase(), operands.getIndices(), rewriter);
+        rewriter, loc, llvm::cast<MemRefType>(instrumentOp.getBase().getType()),
+        operands.getBase(), operands.getIndices());
     Value addressI64 =
         rewriter.create<LLVM::PtrToIntOp>(loc, i64Type, storePtr);
 
@@ -929,19 +929,35 @@ public:
 
 } // namespace
 
-static std::string getStringAttrFromTargetAttr(ModuleOp module,
-                                               StringRef attrName) {
+static std::string getDataLayoutString(ModuleOp module) {
   auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(module);
-  auto stringAttr = getConfigStringAttr(targetAttr, attrName);
+  if (!targetAttr)
+    return "";
+  std::optional<StringRef> stringAttr =
+      getConfigDataLayout(targetAttr.getConfiguration());
   return stringAttr ? stringAttr.value().str() : std::string("");
+}
+
+static std::string getTargetTripleString(ModuleOp module) {
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(module);
+  if (!targetAttr)
+    return "";
+  std::optional<StringRef> stringAttr =
+      getConfigTargetTriple(targetAttr.getConfiguration());
+  return stringAttr ? stringAttr.value().str() : std::string("");
+}
+
+static void populateTanhPatterns(RewritePatternSet &p) {
+  StringRef fname = math::TanhOp::getOperationName();
+  StringRef opName =
+      fname.drop_front(math::MathDialect::getDialectNamespace().size() + 1);
+  math::populateExpansionPatterns(p, /*OpMnemonics=*/{opName});
 }
 
 void ConvertToLLVMPass::runOnOperation() {
   auto module = getOperation();
-  std::string dataLayoutStr =
-      getStringAttrFromTargetAttr(module, "data_layout");
-  std::string targetTripleStr =
-      getStringAttrFromTargetAttr(module, "target_triple");
+  std::string dataLayoutStr = getDataLayoutString(module);
+  std::string targetTripleStr = getTargetTripleString(module);
 
   // Add required attributes to the module so that the lowering knows how to
   // handle structs and data layouts.
@@ -949,6 +965,10 @@ void ConvertToLLVMPass::runOnOperation() {
                   StringAttr::get(module->getContext(), targetTripleStr));
   module->setAttr(LLVM::LLVMDialect::getDataLayoutAttrName(),
                   StringAttr::get(module->getContext(), dataLayoutStr));
+
+  DictionaryAttr targetConfig;
+  if (auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(module))
+    targetConfig = targetAttr.getConfiguration();
 
   // Run Vector -> Vector transformations ahead of conversion to LLVM.
   {
@@ -959,8 +979,9 @@ void ConvertToLLVMPass::runOnOperation() {
     vector::populateVectorInterleaveLoweringPatterns(patterns);
     // TODO: doubtful that the "default" does what one want here, it is likely
     // better to use outerproduct.
+    vector::VectorTransformsOptions defaultOptions;
     vector::populateVectorContractLoweringPatterns(
-        patterns, vector::VectorTransformsOptions());
+        patterns, defaultOptions.vectorContractLowering);
     vector::populateVectorMaskMaterializationPatterns(
         patterns, /*force32BitVectorIndices=*/false);
     vector::populateVectorMaskOpLoweringPatterns(patterns);
@@ -968,9 +989,9 @@ void ConvertToLLVMPass::runOnOperation() {
     // TODO: doubtful that the "default" does what one want here, it is likely
     // better to use shuffle.
     vector::populateVectorTransposeLoweringPatterns(
-        patterns, vector::VectorTransformsOptions());
+        patterns, defaultOptions.vectorTransposeLowering);
     populateConvertArmNeon2dToIntrPatterns(patterns);
-    if (failed(applyPatternsAndFoldGreedily(getOperation(),
+    if (failed(applyPatternsGreedily(getOperation(),
                                             std::move(patterns)))) {
       return signalPassFailure();
     }
@@ -979,7 +1000,7 @@ void ConvertToLLVMPass::runOnOperation() {
     RewritePatternSet vectorToLoopsPatterns(&getContext());
     populateVectorToSCFConversionPatterns(
         vectorToLoopsPatterns, VectorTransferToSCFOptions().enableFullUnroll());
-    if (failed(applyPatternsAndFoldGreedily(
+    if (failed(applyPatternsGreedily(
             getOperation(), std::move(vectorToLoopsPatterns)))) {
       return signalPassFailure();
     }
@@ -1004,14 +1025,13 @@ void ConvertToLLVMPass::runOnOperation() {
   //
   // TODO(bjacob): Use a lowering that uses specific ARM/X86 intrinsics.
   bool use32BitImpl = false;
-  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(module);
-  if (isRISCV(targetAttr)) {
+  if (targetConfig && isRISCV(targetConfig)) {
     // Use the 32-bit lowering for RISC-V if 'zve32*' is specified and there is
     // no 64-bit integer vector support.
     // TODO(#9440) Simplify logic when 'cpu_features' is simplified.
     use32BitImpl =
-        (hasZve32xFeature(targetAttr) || hasZve32fFeature(targetAttr)) &&
-        !hasVFeature(targetAttr) && !hasZve64xFeature(targetAttr);
+        (hasZve32xFeature(targetConfig) || hasZve32fFeature(targetConfig)) &&
+        !hasVFeature(targetConfig) && !hasZve64xFeature(targetConfig);
   }
   tosa::populateTosaRescaleToArithConversionPatterns(&patterns, use32BitImpl);
 
@@ -1025,7 +1045,7 @@ void ConvertToLLVMPass::runOnOperation() {
   populateAffineToStdConversionPatterns(patterns);
   populateSCFToControlFlowConversionPatterns(patterns);
   cf::populateControlFlowToLLVMConversionPatterns(typeConverter, patterns);
-  populateExpandTanhPattern(patterns);
+  populateTanhPatterns(patterns);
 
   populateComplexToLLVMConversionPatterns(typeConverter, patterns);
   populateMathToLLVMConversionPatterns(typeConverter, patterns);
@@ -1035,7 +1055,6 @@ void ConvertToLLVMPass::runOnOperation() {
   arith::populateArithToLLVMConversionPatterns(typeConverter, patterns);
   arith::populateExpandBFloat16Patterns(patterns);
   populateVectorToSCFConversionPatterns(patterns);
-  populateVectorToLLVMMatrixConversionPatterns(typeConverter, patterns);
   populateVectorToLLVMConversionPatterns(typeConverter, patterns, false);
   populateSnitchToLLVMConversionPatterns(module, typeConverter, patterns);
   populateDMAToLLVMConversionPatterns(module, typeConverter, patterns);
@@ -1073,7 +1092,7 @@ void ConvertToLLVMPass::runOnOperation() {
     RewritePatternSet patterns(&getContext());
     patterns.insert<RewriteExternCallOpToDynamicImportCallOp, RewriteCallOpABI,
                     RewriteFuncOpABI>(abi, typeConverter);
-    if (failed(applyPatternsAndFoldGreedily(module, std::move(patterns))))
+    if (failed(applyPatternsGreedily(module, std::move(patterns))))
       return signalPassFailure();
   }
 
@@ -1085,7 +1104,7 @@ void ConvertToLLVMPass::runOnOperation() {
     if (triple.isWasm()) {
       populateUnfusedFMAOpsPassPatterns(&getContext(), postPatterns);
     }
-    if (failed(applyPatternsAndFoldGreedily(module, std::move(postPatterns)))) {
+    if (failed(applyPatternsGreedily(module, std::move(postPatterns)))) {
       return signalPassFailure();
     }
   }

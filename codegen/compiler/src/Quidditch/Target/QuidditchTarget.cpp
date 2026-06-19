@@ -158,7 +158,7 @@ public:
                 IntegerAttr::get(IntegerType::get(context, 32), 8));
     executableTargetAttrs.push_back(IREE::HAL::ExecutableTargetAttr::get(
         context, StringAttr::get(context, "quidditch"),
-        StringAttr::get(context, "static"), list.getDictionary(context)));
+        StringAttr::get(context, "snitch"), list.getDictionary(context)));
   }
 
   void
@@ -181,8 +181,9 @@ public:
     OpPassManager &modulePassManager = passManager.nest<ModuleOp>();
 
     FunctionLikeNest(modulePassManager)
-        .addPass([] { return createTileAndDistributeToWorkgroupsPass(); })
-        .addPass([] { return createConvertToDestinationPassingStylePass(); })
+        .addPass(
+            [] { return createTileAndDistributeToWorkgroupsUsingForallOpPass(); })
+        .addPass([] { return createBufferizeDispatchTensorLoadStorePass(); })
         .addPass(quidditch::createPadToTilingConfigPass)
         .addPass(createFoldAffineMinInDistributedLoopsPass)
         .addPass(quidditch::createRemoveTrivialLoopsPass)
@@ -271,14 +272,14 @@ public:
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
 
-    addConstantBufferizePasses(modulePassManager);
+    modulePassManager.addPass(createIREEBufferizeConstantsPass());
 
     FunctionLikeNest(modulePassManager)
         .addPass(createFoldTensorExtractOpPass)
         // Handle complex operation conversion.
         .addPass(createConvertComplexToStandardPass)
         // math dialect elementary functions -> polynomial form.
-        .addPass(createPolynomialApproximationPass)
+        .addPass(createMathTransformPass)
         .addPass(createHoistStaticallyBoundAllocationsPass)
         .addPass(createIREEExpandStridedMetadataPass)
         .addPass(createCleanupBufferAllocViewPass);
@@ -300,6 +301,14 @@ public:
     modulePassManager.addPass(createCSEPass());
     modulePassManager.addNestedPass<LLVM::LLVMFuncOp>(
         createAddFastMathFlagsPass());
+
+    // The forall-based workgroup distribution leaves the export op's
+    // 'workgroup_count' region as an abstract 'workgroup_count_from_slice';
+    // resolve it to concrete i32 counts (mirrors the LLVMCPU/VMVX variant
+    // pipeline) so the host module's command_buffer.dispatch import is satisfied.
+    passManager.addPass(createReconcileTranslationInfoPass());
+    passManager.addPass(createResolveWorkgroupCountHintsPass());
+
     passManager.addPass(quidditch::createDisableQuidditchVariantPass());
   }
 
@@ -450,7 +459,7 @@ public:
 
     // Specialize the module to our target machine.
     llvmModule->setDataLayout(machine.createDataLayout());
-    llvmModule->setTargetTriple(machine.getTargetTriple().str());
+    llvmModule->setTargetTriple(machine.getTargetTriple());
     return llvmModule;
   }
 
@@ -520,9 +529,9 @@ public:
 
     std::unique_ptr<llvm::TargetMachine> machine(
         llvmTarget->createTargetMachine(
-            "riscv32-unknown-unknown-elf", "generic-rv32" /* cpu e.g k8 */,
-            "+m,+f,+d,+zfh", {}, llvm::Reloc::Model::PIC_, {},
-            llvm::CodeGenOptLevel::Aggressive,
+            llvm::Triple("riscv32-unknown-unknown-elf"),
+            "generic-rv32" /* cpu e.g k8 */, "+m,+f,+d,+zfh", {},
+            llvm::Reloc::Model::PIC_, {}, llvm::CodeGenOptLevel::Aggressive,
             /*JIT=*/false));
 
     llvm::LLVMContext context;

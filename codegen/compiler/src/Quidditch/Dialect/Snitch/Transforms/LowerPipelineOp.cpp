@@ -147,7 +147,7 @@ void LowerPipelineOp::runOnOperation() {
         mapping.map(stage.getArguments().front(),
                     getInductionVarForStage(builder, stage, currentIV,
                                             pipelineOp.getStep()));
-        if (stage != pipelineOp.getStages().front())
+        if (&stage != &pipelineOp.getStages().front())
           for (auto [oldBlockArg, newBlockArg] :
                llvm::zip_equal(stage.getArguments().drop_front(),
                                oldResultsOfStages[stage.getRegionNumber() - 1]))
@@ -186,7 +186,7 @@ void LowerPipelineOp::runOnOperation() {
 
         IRMapping mapping;
         mapping.map(stage.getArguments().front(), iv);
-        if (stage != pipelineOp.getStages().front()) {
+        if (&stage != &pipelineOp.getStages().front()) {
           size_t begin = endOfStageIndex[stage.getRegionNumber() - 1];
           size_t end = endOfStageIndex[stage.getRegionNumber()];
           MutableArrayRef<BlockArgument> argument =
@@ -234,7 +234,7 @@ void LowerPipelineOp::runOnOperation() {
                              oldResultsOfStages[stage.getRegionNumber() - 1]))
           mapping.map(oldBlockArg, newBlockArg);
 
-        if (stage != pipelineOp.getStages().back())
+        if (&stage != &pipelineOp.getStages().back())
           newResultsOfStages[stage.getRegionNumber()] =
               insertStage(builder, stage, mapping);
         else

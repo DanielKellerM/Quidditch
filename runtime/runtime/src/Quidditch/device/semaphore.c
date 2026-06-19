@@ -256,8 +256,8 @@ static bool quidditch_semaphore_is_signaled(
 }
 
 static iree_status_t quidditch_semaphore_wait(
-    iree_hal_semaphore_t* base_semaphore, uint64_t value,
-    iree_timeout_t timeout) {
+    iree_hal_semaphore_t* base_semaphore, uint64_t value, iree_timeout_t timeout,
+    iree_hal_wait_flags_t flags) {
   quidditch_semaphore_t* semaphore = quidditch_semaphore_cast(base_semaphore);
 
   // Try to see if we can return immediately.
@@ -393,7 +393,8 @@ iree_status_t quidditch_semaphore_multi_wait(
   } else if (semaphore_list.count == 1) {
     // Fast-path for a single semaphore.
     return iree_hal_semaphore_wait(semaphore_list.semaphores[0],
-                                   semaphore_list.payload_values[0], timeout);
+                                   semaphore_list.payload_values[0], timeout,
+                                   IREE_HAL_WAIT_FLAG_DEFAULT);
   }
 
   IREE_TRACE_ZONE_BEGIN(z0);
@@ -422,10 +423,30 @@ iree_status_t quidditch_semaphore_multi_wait(
   return status;
 }
 
+static iree_status_t quidditch_semaphore_import_timepoint(
+    iree_hal_semaphore_t* base_semaphore, uint64_t value,
+    iree_hal_queue_affinity_t queue_affinity,
+    iree_hal_external_timepoint_t external_timepoint) {
+  return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                          "timepoint import is not yet implemented");
+}
+
+static iree_status_t quidditch_semaphore_export_timepoint(
+    iree_hal_semaphore_t* base_semaphore, uint64_t value,
+    iree_hal_queue_affinity_t queue_affinity,
+    iree_hal_external_timepoint_type_t requested_type,
+    iree_hal_external_timepoint_flags_t requested_flags,
+    iree_hal_external_timepoint_t* IREE_RESTRICT out_external_timepoint) {
+  return iree_make_status(IREE_STATUS_UNIMPLEMENTED,
+                          "timepoint export is not yet implemented");
+}
+
 static const iree_hal_semaphore_vtable_t quidditch_semaphore_vtable = {
     .destroy = quidditch_semaphore_destroy,
     .query = quidditch_semaphore_query,
     .signal = quidditch_semaphore_signal,
     .fail = quidditch_semaphore_fail,
     .wait = quidditch_semaphore_wait,
+    .import_timepoint = quidditch_semaphore_import_timepoint,
+    .export_timepoint = quidditch_semaphore_export_timepoint,
 };

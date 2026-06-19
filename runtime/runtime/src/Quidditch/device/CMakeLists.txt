@@ -11,12 +11,13 @@ iree_cc_library(
     iree::base
     iree::base::internal
     iree::base::internal::arena
-    iree::base::internal::synchronization
+    iree::base::threading
     iree::hal::local::executable_library_util
     iree::hal::local::executable_loader
     iree::hal::utils::deferred_command_buffer
     iree::hal::utils::file_transfer
-    iree::hal::utils::memory_file
+    iree::hal::utils::files
+    iree::hal::utils::queue_emulation
     iree::hal::utils::semaphore_base
     Quidditch::command_buffer::command_buffer
     PUBLIC
