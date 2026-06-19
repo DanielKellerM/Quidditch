@@ -9,6 +9,7 @@
 #include "mlir/Interfaces/InferTypeOpInterface.h"
 #include "mlir/Interfaces/LoopLikeInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
+#include "mlir/Interfaces/ValueBoundsOpInterface.h"
 
 #include "QuidditchSnitchInterfaces.h"
 #include "QuidditchSnitchTypes.h"

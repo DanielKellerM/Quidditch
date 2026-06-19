@@ -100,7 +100,7 @@ static void pipelineForLoop(scf::ForOp forOp) {
         continue;
 
       // Ignore if outside the for loop.
-      if (tensorCopyWait->getParentRegion() != forOp.getRegion())
+      if (tensorCopyWait->getParentRegion() != &forOp.getRegion())
         continue;
 
       if (isa<BlockArgument>(tensorCopyWait.getTransferTensor()))

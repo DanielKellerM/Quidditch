@@ -31,8 +31,11 @@ using namespace quidditch::Snitch;
 
 void LowerForallOp::runOnOperation() {
   getOperation()->walk([&](scf::ForallOp forallOp) {
-    std::optional<IntegerAttr> attr = getConfigIntegerAttr(
-        IREE::HAL::ExecutableTargetAttr::lookup(forallOp), "compute_cores");
+    auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(forallOp);
+    IntegerAttr attr =
+        targetAttr && targetAttr.getConfiguration()
+            ? targetAttr.getConfiguration().getAs<IntegerAttr>("compute_cores")
+            : nullptr;
     if (!attr)
       return;
 
@@ -61,7 +64,7 @@ void LowerForallOp::runOnOperation() {
         forallOp.getLoc(),
         AffineMap::get(
             1, 0,
-            {builder.getAffineConstantExpr(attr->getValue().getSExtValue()) *
+            {builder.getAffineConstantExpr(attr.getValue().getSExtValue()) *
              builder.getAffineDimExpr(0)},
             &getContext()),
         step);

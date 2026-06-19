@@ -9,10 +9,16 @@
 #define SNRT_CRT0_POST_BARRIER
 #define SNRT_CRT0_EXIT
 
-extern uint32_t tohost;
+extern volatile uint32_t tohost;
 
 static inline volatile uint32_t* snrt_exit_code_destination() {
   return (volatile uint32_t*)&tohost;
 }
+
+// Pull in the inline bodies (snrt_exit, snrt_exit_default, ...) guarded by the
+// SNRT_CRT0_* macros above. The upstream impl/snitch_cluster_start.h does this;
+// this Quidditch start file must too, otherwise snrt_main (in start.c) calls a
+// snrt_exit whose definition is never seen and the symbol is left undefined.
+#include "start.h"
 
 #include "start.c"

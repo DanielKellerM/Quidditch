@@ -39,7 +39,7 @@ static LogicalResult setTranslationInfo(FunctionOpInterface funcOp) {
 static LogicalResult setRootConfig(FunctionOpInterface funcOp,
                                    Operation *rootOp) {
   return TypeSwitch<Operation *, LogicalResult>(rootOp)
-      .Case<linalg::MatmulTransposeBOp>([&](linalg::LinalgOp op) {
+      .Case<linalg::MatmulTransposeBOp>([&](linalg::MatmulTransposeBOp op) {
         // [0]: Always one in our matvec case.
 
         // [1]: How many rows we are processing. Should fit in L1.
@@ -129,6 +129,6 @@ void ConfigureForSnitch::runOnOperation() {
   // Resolve those away.
   RewritePatternSet patterns(funcOp.getContext());
   memref::populateResolveRankedShapedTypeResultDimsPatterns(patterns);
-  if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns))))
+  if (failed(applyPatternsGreedily(funcOp, std::move(patterns))))
     signalPassFailure();
 }

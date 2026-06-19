@@ -59,6 +59,7 @@ struct BarrierOpLowering : ConvertOpToLLVMPattern<BarrierOp> {
         /*operands=*/ValueRange(), "csrr x0, 0x7C2",
         /*constraints=*/"~{memory}",
         /*has_side_effects=*/true, /*is_align_stack=*/false,
+        /*tail_call_kind=*/LLVM::TailCallKind::None,
         /*asm_dialect=*/nullptr, /*operand_attrs=*/nullptr);
     return success();
   }
@@ -86,6 +87,7 @@ struct MicrokernelFenceOpLowering : ConvertOpToLLVMPattern<MicrokernelFenceOp> {
         // 'has_side_effects' is currently set to true due to a bug in MLIR
         // DCEing despite the memory clobber.
         /*has_side_effects=*/true, /*is_align_stack=*/false,
+        /*tail_call_kind=*/LLVM::TailCallKind::None,
         /*asm_dialect=*/nullptr, /*operand_attrs=*/nullptr);
     rewriter.eraseOp(op);
     return success();
@@ -117,12 +119,9 @@ struct CallMicrokernelOpLowering : ConvertOpToLLVMPattern<CallMicrokernelOp> {
               memRefType.getShape(), memRefType.getElementType(),
               /*layout=*/nullptr, memRefType.getMemorySpace());
         }
-        Type converted = getTypeConverter()->convertCallingConventionType(
-            type, /*useBarePointerCallConv=*/true);
-        if (!converted)
+        if (failed(getTypeConverter()->convertCallingConventionType(
+                type, types, /*useBarePointerCallConv=*/true)))
           return failure();
-
-        types.push_back(converted);
       }
 
       kernelDecl = rewriter.create<LLVM::LLVMFuncOp>(

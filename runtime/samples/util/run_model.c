@@ -6,12 +6,20 @@
 
 #include <iree/base/allocator.h>
 #include <iree/hal/allocator.h>
+#include <iree/hal/device_group.h>
+#include <iree/modules/hal/debugging.h>
 #include <iree/modules/hal/module.h>
 #include <iree/modules/hal/types.h>
 #include <iree/vm/instance.h>
 
 #include <stack_decls.h>
 #include <team_decls.h>
+
+// snRuntime iDMA (internal API — not exported in snRuntime/api/; symbols live in
+// libsnRuntime via the extern-inline in src/dma.c). Phase-4 buffer-marshaling offload (§21).
+typedef uint32_t snrt_dma_txid_t;
+extern snrt_dma_txid_t snrt_dma_start_1d(void *dst, const void *src, size_t size);
+extern void snrt_dma_wait_all(void);
 
 static iree_status_t setup_instance_and_device(
     const model_config_t* config, iree_allocator_t host_allocator,
@@ -64,11 +72,17 @@ iree_status_t run_model(const model_config_t* config) {
       setup_instance_and_device(config, host_allocator, &vmInstance, &device);
   IREE_RETURN_IF_ERROR(result);
 
+  iree_hal_device_group_t* device_group = NULL;
+  result = iree_hal_device_group_create_from_device(device, host_allocator,
+                                                    &device_group);
+  if (!iree_status_is_ok(result)) goto error_release_instance_and_device;
+
   iree_vm_module_t* hal_module = NULL;
-  result =
-      iree_hal_module_create(vmInstance, /*device_count=*/1,
-                             /*devices=*/&device, IREE_HAL_MODULE_FLAG_NONE,
-                             host_allocator, &hal_module);
+  result = iree_hal_module_create(
+      vmInstance, iree_hal_module_device_policy_default(), device_group,
+      IREE_HAL_MODULE_FLAG_NONE, iree_hal_module_debug_sink_null(),
+      host_allocator, &hal_module);
+  iree_hal_device_group_release(device_group);
   if (!iree_status_is_ok(result)) goto error_release_instance_and_device;
 
   iree_vm_module_t* mlir_module = NULL;
@@ -143,12 +157,21 @@ iree_status_t run_model(const model_config_t* config) {
         iree_vm_list_get_ref_deref(outputs, i, iree_hal_buffer_view_type());
     if (ret_buffer_view == NULL) goto error_release_output;
 
-    iree_hal_device_transfer_d2h(
-        device, iree_hal_buffer_view_buffer(ret_buffer_view), 0,
-        config->output_data[i],
+    // §21 Phase-4(A): offload the output download to the iDMA. The old path was
+    // iree_hal_device_transfer_d2h -> map + scalar memcpy on the DM core (the 52%).
+    // "Device" memory is host memory (heap allocator), so map gives a direct pointer
+    // and the iDMA copies host->host (L3->L3) far faster than scalar memcpy.
+    iree_device_size_t nbytes =
         config->output_sizes[i] *
-            iree_hal_element_dense_byte_count(config->element_type),
-        IREE_HAL_TRANSFER_BUFFER_FLAG_DEFAULT, iree_infinite_timeout());
+        iree_hal_element_dense_byte_count(config->element_type);
+    iree_hal_buffer_mapping_t mapping;
+    IREE_CHECK_OK(iree_hal_buffer_map_range(
+        iree_hal_buffer_view_buffer(ret_buffer_view),
+        IREE_HAL_MAPPING_MODE_SCOPED, IREE_HAL_MEMORY_ACCESS_READ,
+        /*byte_offset=*/0, nbytes, &mapping));
+    snrt_dma_start_1d(config->output_data[i], mapping.contents.data, nbytes);
+    snrt_dma_wait_all();
+    iree_hal_buffer_unmap_range(&mapping);
   }
 
 error_release_output:

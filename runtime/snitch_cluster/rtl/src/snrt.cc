@@ -4,6 +4,7 @@
 
 #include "snrt.h"
 
+#include "cls.c"
 #include "cluster_interrupts.c"
 #include "dma.c"
 #include "printf.c"

@@ -21,16 +21,6 @@ typedef struct quidditch_executable_t {
   iree_hal_resource_t resource;
   iree_allocator_t host_allocator;
 
-  // Optional pipeline layout
-  // Not all users require the layouts (such as when directly calling executable
-  // functions) and in those cases they can be omitted. Users routing through
-  // the HAL command buffer APIs will usually require them.
-  //
-  // TODO(benvanik): make this a flag we set and can query instead - poking into
-  // this from dispatch code is a layering violation.
-  iree_host_size_t pipeline_layout_count;
-  iree_hal_pipeline_layout_t** pipeline_layouts;
-
   // Defines per-entry point how much workgroup local memory is required.
   // Contains entries with 0 to indicate no local memory is required or >0 in
   // units of IREE_HAL_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE for the minimum amount
@@ -50,8 +40,6 @@ typedef struct quidditch_executable_t {
   } library;
 
   bool is_llvm_cpu_executable;
-
-  iree_hal_pipeline_layout_t* layouts[];
 } quidditch_executable_t;
 
 iree_status_t quidditch_executable_create(
@@ -61,13 +49,7 @@ iree_status_t quidditch_executable_create(
     iree_allocator_t host_allocator, iree_hal_executable_t** out_executable);
 
 // Initializes the local executable base type.
-//
-// Callers must allocate memory for |target_pipeline_layouts| with at least
-// `pipeline_layout_count * sizeof(*target_pipeline_layouts)` bytes.
 void quidditch_executable_initialize(
-    iree_host_size_t pipeline_layout_count,
-    iree_hal_pipeline_layout_t* const* source_pipeline_layouts,
-    iree_hal_pipeline_layout_t** target_pipeline_layouts,
     iree_allocator_t host_allocator,
     quidditch_executable_t* out_base_executable);
 

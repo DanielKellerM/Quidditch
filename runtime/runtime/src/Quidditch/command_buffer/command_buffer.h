@@ -16,7 +16,8 @@ extern "C" {
 // Returns the size, in bytes, of an inline command buffer.
 // This can be used for arena/stack allocations along with
 // quidditch_command_buffer_initialize/quidditch_command_buffer_deinitialize.
-iree_host_size_t quidditch_command_buffer_size(void);
+iree_host_size_t quidditch_command_buffer_size(
+    iree_hal_command_buffer_mode_t mode, iree_host_size_t binding_capacity);
 
 // Initializes an inline synchronous one-shot single-threaded command "buffer".
 // This is equivalent to quidditch_command_buffer_create but uses

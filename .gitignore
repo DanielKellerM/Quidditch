@@ -2,5 +2,18 @@
 /.venv
 /toolchain
 /build
+/build-rt
+/build-rt.clang18.bak
 .ccls*
 */compile_commands.json
+
+# Simulation run artifacts (kept under runs/ by scripts/run_on_sim.sh)
+/runs
+/logs
+*.wlf
+*.vstf
+*stacktrace*
+.rtlbinary
+transcript
+dma_trace_*.log
+trace_hart_*.dasm

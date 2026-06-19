@@ -11,6 +11,7 @@ include "mlir/Interfaces/ControlFlowInterfaces.td"
 include "mlir/Interfaces/LoopLikeInterface.td"
 include "mlir/Interfaces/InferTypeOpInterface.td"
 include "mlir/Interfaces/SideEffectInterfaces.td"
+include "mlir/Interfaces/ValueBoundsOpInterface.td"
 
 class QuidditchSnitch_Op<string mnemonic, list<Trait> traits = []> :
   Op<QuidditchSnitch_Dialect, mnemonic, traits>;
@@ -18,7 +19,7 @@ class QuidditchSnitch_Op<string mnemonic, list<Trait> traits = []> :
 def QuidditchSnitch_TensorMicrokernelOp : QuidditchSnitch_Op<"tensor.microkernel",
   [SingleBlock, NoRegionArguments, RecursivelySpeculatable, RecursiveMemoryEffects,
    DeclareOpInterfaceMethods<RegionBranchOpInterface, [
-    "getRegionInvocationBounds"]>,
+    "getRegionInvocationBounds", "getSuccessorInputs"]>,
    DeclareOpInterfaceMethods<BufferizableOpInterface, ["bufferize",
     "getAliasingOpOperands", "getBufferType"]>]> {
 
@@ -194,7 +195,9 @@ def QuidditchSnitch_BarrierOp : QuidditchSnitch_Op<"barrier"> {
 
 def QuidditchSnitch_ComputeCoreIndexOp
   : QuidditchSnitch_Op<"compute_core_index", [Pure,
-      QuidditchSnitch_ComputeCoreSpecializationOpInterface]> {
+      QuidditchSnitch_ComputeCoreSpecializationOpInterface,
+      DeclareOpInterfaceMethods<ValueBoundsOpInterface,
+        ["populateBoundsForIndexValue"]>]> {
 
   let description = [{
     Returns the index of the compute core within a given cluster.
@@ -222,7 +225,7 @@ def QuidditchSnitch_PipelineOp : QuidditchSnitch_Op<"pipeline",
    DeclareOpInterfaceMethods<LoopLikeOpInterface,
     ["moveOutOfLoop"]>,
    DeclareOpInterfaceMethods<RegionBranchOpInterface,
-    ["getEntrySuccessorOperands"]>,
+    ["getEntrySuccessorOperands", "getSuccessorInputs"]>,
    DeclareOpInterfaceMethods<BufferizableOpInterface,
     ["bufferizesToMemoryRead", "bufferizesToMemoryWrite", "getAliasingValues",
      "bufferize", "getBufferType", "isWritable", "getAliasingOpOperands",

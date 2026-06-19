@@ -1,5 +1,18 @@
 # Quidditch
 
+## Latest-cluster port (this fork)
+
+This branch ports Quidditch to the **latest `snitch_cluster`**, **IREE v3.11.0**, and **xDSL v0.66.0**.
+The submodules are pinned to forks that carry the required fixes, so a recursive clone builds reproducibly:
+
+- `iree` → [`DanielKellerM/iree`](https://github.com/DanielKellerM/iree) `v3.11.0-quidditch-port` — v3.11.0 plus a static-`printf` embed that avoids a symbol clash with the snRuntime `printf` (the `%n` writeback specifier stays disabled, matching IREE's overlay).
+- `xdsl` → upstream [`xdslproject/xdsl`](https://github.com/xdslproject/xdsl) `v0.66.0` (unmodified).
+- `snitch_cluster` → [`DanielKellerM/snitch_cluster`](https://github.com/DanielKellerM/snitch_cluster) `quidditch-port` — pins iDMA `v0.6.5`, the axi multicast fork, and the `common_cells` `snitch` branch.
+- axi multicast build fix → [`DanielKellerM/axi`](https://github.com/DanielKellerM/axi) `multicast-snitch-fix` (consumed transitively by `snitch_cluster` via bender).
+
+The Python environment is managed with [`uv`](https://docs.astral.sh/uv/) (`pyproject.toml` + `uv.lock`); the previous `requirements*.txt` files were removed.
+To run a built sample on the Questa simulator while keeping logs and traces out of the source tree, use `scripts/run_on_sim.sh <elf> [run-name]` — all artifacts land under `runs/<name>/`.
+
 ## Building
 
 Only linux is currently supported as a build environment
@@ -31,15 +44,16 @@ There are two CMake projects in Quidditch, one is the IREE-based compiler (`code
 To build, run the following commands:
 
 ```shell
-git clone --recursive https://github.com/opencompl/quidditch
-cd quidditch
+# This fork + port branch; --recursive resolves the submodules to the pinned forks above.
+git clone --recursive -b port-latest-snitch-cluster https://github.com/DanielKellerM/Quidditch
+cd Quidditch
 
 mkdir toolchain
 docker run --rm ghcr.io/opencompl/quidditch/toolchain:main tar -cC /opt/quidditch-toolchain .\
  | tar -xC ./toolchain
 
-python -m venv venv
-source ./venv/bin/activate
+uv sync
+source ./.venv/bin/activate
 
 mkdir build && cd build
 cmake .. -GNinja \
