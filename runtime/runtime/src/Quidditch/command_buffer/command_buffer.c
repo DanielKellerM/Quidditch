@@ -487,19 +487,21 @@ static iree_status_t quidditch_command_buffer_dispatch(
         buffer_mapping.contents.data_length;
   }
 
-  // TODO(benvanik): plumb through an arena or fixed-size reservation to use.
-  // For now when deploying to devices where you want something like the
-  // inline command buffer you probably don't want 256KB of transient memory
-  // getting allocated and retained implicitly - this should be a compiler
-  // option. For now we just malloc here to make things work and strongly
-  // encourage the kind of user who wants synchronous inline execution to not
-  // also want tons of scratch memory.
-  iree_byte_span_t local_memory = iree_make_byte_span(NULL, local_memory_size);
-  if (local_memory_size > 0) {
-    IREE_RETURN_IF_ERROR(iree_allocator_malloc(command_buffer->host_allocator,
-                                               local_memory_size,
-                                               (void**)&local_memory.data));
+  // Reuse a scratch reservation cached on the executable, grown on demand,
+  // instead of a malloc/free on every dispatch. Safe because the device runs
+  // dispatches synchronously (concurrency == 1), so the buffer is never used by
+  // two dispatches at once.
+  if (local_memory_size > local_executable->local_memory_scratch.data_length) {
+    iree_allocator_free(local_executable->host_allocator,
+                        local_executable->local_memory_scratch.data);
+    local_executable->local_memory_scratch = iree_make_byte_span(NULL, 0);
+    IREE_RETURN_IF_ERROR(iree_allocator_malloc(
+        local_executable->host_allocator, local_memory_size,
+        (void**)&local_executable->local_memory_scratch.data));
+    local_executable->local_memory_scratch.data_length = local_memory_size;
   }
+  iree_byte_span_t local_memory = iree_make_byte_span(
+      local_executable->local_memory_scratch.data, local_memory_size);
 
   // Since we are running on a borrowed thread, we know nothing about the
   // floating point state. Reset it.
@@ -510,9 +512,6 @@ static iree_status_t quidditch_command_buffer_dispatch(
       command_buffer->state.processor_id, local_memory);
   iree_fpu_state_pop(fpu_state);
 
-  if (local_memory.data) {
-    iree_allocator_free(command_buffer->host_allocator, local_memory.data);
-  }
   return status;
 }
 

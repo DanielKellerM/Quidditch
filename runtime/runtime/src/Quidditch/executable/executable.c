@@ -22,6 +22,7 @@ static void quidditch_executable_destroy(
   iree_hal_executable_library_deinitialize_imports(&executable->environment,
                                                    host_allocator);
 
+  iree_allocator_free(host_allocator, executable->local_memory_scratch.data);
   iree_allocator_free(host_allocator, executable);
 
   IREE_TRACE_ZONE_END(z0);

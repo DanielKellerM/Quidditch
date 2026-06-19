@@ -39,6 +39,11 @@ typedef struct quidditch_executable_t {
     const quidditch_executable_library_v0_t* quidditch_v0;
   } library;
 
+  // Transient workgroup-local-memory scratch, grown on demand and reused across
+  // dispatches instead of a malloc/free per dispatch. Safe because the device
+  // executes dispatches synchronously (concurrency == 1).
+  iree_byte_span_t local_memory_scratch;
+
   bool is_llvm_cpu_executable;
 } quidditch_executable_t;
 
