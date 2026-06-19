@@ -6,6 +6,8 @@
 
 #include <iree/base/allocator.h>
 #include <iree/hal/allocator.h>
+#include <iree/hal/device_group.h>
+#include <iree/modules/hal/debugging.h>
 #include <iree/modules/hal/module.h>
 #include <iree/modules/hal/types.h>
 #include <iree/vm/instance.h>
@@ -70,11 +72,17 @@ iree_status_t run_model(const model_config_t* config) {
       setup_instance_and_device(config, host_allocator, &vmInstance, &device);
   IREE_RETURN_IF_ERROR(result);
 
+  iree_hal_device_group_t* device_group = NULL;
+  result = iree_hal_device_group_create_from_device(device, host_allocator,
+                                                    &device_group);
+  if (!iree_status_is_ok(result)) goto error_release_instance_and_device;
+
   iree_vm_module_t* hal_module = NULL;
-  result =
-      iree_hal_module_create(vmInstance, /*device_count=*/1,
-                             /*devices=*/&device, IREE_HAL_MODULE_FLAG_NONE,
-                             host_allocator, &hal_module);
+  result = iree_hal_module_create(
+      vmInstance, iree_hal_module_device_policy_default(), device_group,
+      IREE_HAL_MODULE_FLAG_NONE, iree_hal_module_debug_sink_null(),
+      host_allocator, &hal_module);
+  iree_hal_device_group_release(device_group);
   if (!iree_status_is_ok(result)) goto error_release_instance_and_device;
 
   iree_vm_module_t* mlir_module = NULL;

@@ -72,6 +72,6 @@ void ReluToMax::runOnOperation() {
   RewritePatternSet patterns(&getContext());
   patterns.insert<ReluSelectToMaxLTPattern, ReluSelectToMaxGTPattern>(
       &getContext());
-  if (failed(applyPatternsAndFoldGreedily(getOperation(), std::move(patterns))))
+  if (failed(applyPatternsGreedily(getOperation(), std::move(patterns))))
     signalPassFailure();
 }

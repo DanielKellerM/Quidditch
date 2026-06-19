@@ -67,7 +67,7 @@ void LowerL1Allocations::runOnOperation() {
     // We do not support anything but a zero offset right now.
     [[maybe_unused]] int64_t ignoredOffset;
     SmallVector<int64_t> strides;
-    if (failed(getStridesAndOffset(memRefType, strides, ignoredOffset))) {
+    if (failed(memRefType.getStridesAndOffset(strides, ignoredOffset))) {
       allocOp->emitOpError(
           "Cannot lower MemRef in L1 memory with a non-strided layout");
       signalPassFailure();

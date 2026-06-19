@@ -6,6 +6,6 @@
 using namespace mlir;
 using namespace quidditch::SnitchDMA;
 
-StringRef QueueResource::getName() {
+StringRef QueueResource::getName() const {
   return "queue";
 }

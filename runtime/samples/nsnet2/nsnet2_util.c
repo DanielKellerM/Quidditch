@@ -41,10 +41,8 @@ int run_nsnet2_experiment(
 
   IREE_CHECK_OK(run_model(&config));
 
-  for (int i = 0; i < IREE_ARRAYSIZE(*data); i++) {
-    double value = (*data)[i];
-    printf("%f\n", value);
-  }
+  // §22 Phase-4: output printf stripped — it was ~78% of the DM-core work
+  // (float-formatting via __dtoa), masking the genuine IREE dispatch tax (§19).
   free(data);
   return 0;
 }

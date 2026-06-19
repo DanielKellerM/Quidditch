@@ -15,6 +15,6 @@
 namespace quidditch::SnitchDMA {
 class QueueResource : public mlir::SideEffects::Resource::Base<QueueResource> {
 public:
-  llvm::StringRef getName() override;
+  llvm::StringRef getName() const override;
 };
 } // namespace quidditch::SnitchDMA
