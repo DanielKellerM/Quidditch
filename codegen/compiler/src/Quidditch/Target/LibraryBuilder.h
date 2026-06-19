@@ -46,10 +46,12 @@ public:
     // or some semantic versioning we track in whatever spec we end up having.
     V_0_3 = 0x0000'0003u, // v0.3 - ~2022-08-08
     V_0_4 = 0x0000'0004u, // v0.4 - ~2024-03-12
+    V_0_5 = 0x0000'0005u, // v0.5 - ~2024-08-25
+    V_0_6 = 0x0000'0006u, // v0.6 - ~2025-08-15
 
     // Pinned to the latest version.
     // Requires that the runtime be compiled with the same version.
-    LATEST = V_0_4,
+    LATEST = V_0_6,
   };
 
   // iree_hal_executable_library_features_t
@@ -75,13 +77,24 @@ public:
   // IREE_HAL_WORKGROUP_LOCAL_MEMORY_PAGE_SIZE
   static const int64_t kWorkgroupLocalMemoryPageSize = 4096;
 
+  // iree_hal_executable_dispatch_flags_v0_t
+  enum class DispatchFlags : uint64_t {
+    // IREE_HAL_EXECUTABLE_DISPATCH_FLAG_V0_NONE
+    NONE = 0ull,
+  };
+
   // iree_hal_executable_dispatch_attrs_v0_t
   struct DispatchAttrs {
+    // Flags defining dispatch behavior.
+    DispatchFlags flags = DispatchFlags::NONE;
     // Required workgroup local memory size, in bytes.
     int64_t localMemorySize = 0;
-
-    // True if all values are default and the attributes may be omitted.
-    constexpr bool isDefault() const { return localMemorySize == 0; }
+    // Total number of 32-bit constants used by the dispatch.
+    uint8_t constantCount = 0;
+    // Total number of bindings used by the dispatch.
+    uint8_t bindingCount = 0;
+    // Workgroup size, if known at compile time (0 otherwise).
+    uint32_t workgroupSize[3] = {0, 0, 0};
   };
 
   // iree_hal_executable_source_location_v0_t

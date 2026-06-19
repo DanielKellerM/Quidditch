@@ -437,12 +437,20 @@ public:
                                     .value_or(APInt(64, 0))
                                     .getSExtValue();
 
+      // The runtime strictly validates these against the dispatch (see
+      // command_buffer.c), so they must reflect the export's pipeline layout.
+      Quidditch::LibraryBuilder::DispatchAttrs dispatchAttrs;
+      dispatchAttrs.localMemorySize = localMemorySize;
+      if (auto layoutAttr = exportOp.getLayout()) {
+        dispatchAttrs.constantCount = layoutAttr.getConstants();
+        dispatchAttrs.bindingCount = layoutAttr.getBindings().size();
+      }
+
       Quidditch::LibraryBuilder::SourceLocation sourceLocation;
       SmallVector<Quidditch::LibraryBuilder::SourceLocation> stageLocations;
       libraryBuilder.addExport(
           exportOp.getName(), std::move(sourceLocation),
-          std::move(stageLocations), /*tag=*/"",
-          Quidditch::LibraryBuilder::DispatchAttrs{localMemorySize}, llvmFunc,
+          std::move(stageLocations), /*tag=*/"", dispatchAttrs, llvmFunc,
           dmaPointer);
     }
     auto *queryLibraryFunc =
