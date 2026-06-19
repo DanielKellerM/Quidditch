@@ -31,3 +31,26 @@ extern "C" uint32_t quidditch_export_snrt_cluster_core_idx(void)
 extern "C" uint32_t quidditch_export_snrt_cluster_core_idx(void) {
   return snrt_cluster_core_idx();
 }
+
+extern "C" void quidditch_export_snrt_cluster_hw_barrier(void)
+    asm("snrt_cluster_hw_barrier");
+extern "C" void quidditch_export_snrt_cluster_hw_barrier(void) {
+  snrt_cluster_hw_barrier();
+}
+
+extern "C" int quidditch_export_snrt_is_dm_core(void) asm("snrt_is_dm_core");
+extern "C" int quidditch_export_snrt_is_dm_core(void) {
+  return snrt_is_dm_core();
+}
+
+extern "C" uint32_t quidditch_export_snrt_cluster_compute_core_num(void)
+    asm("snrt_cluster_compute_core_num");
+extern "C" uint32_t quidditch_export_snrt_cluster_compute_core_num(void) {
+  return snrt_cluster_compute_core_num();
+}
+
+extern "C" void quidditch_export_snrt_dma_wait_all(void)
+    asm("snrt_dma_wait_all");
+extern "C" void quidditch_export_snrt_dma_wait_all(void) {
+  snrt_dma_wait_all();
+}

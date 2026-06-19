@@ -8,8 +8,8 @@
 #include <iree/modules/hal/types.h>
 #include <iree/vm/instance.h>
 
-#include <big_matvec.h>
-#include <big_matvec_module.h>
+#include <big_matvec_mod.h>
+#include <big_matvec_mod_module.h>
 #include <team_decls.h>
 #include <util/run_model.h>
 

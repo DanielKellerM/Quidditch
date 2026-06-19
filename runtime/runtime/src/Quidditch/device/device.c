@@ -16,10 +16,10 @@
 #include "iree/base/internal/cpu.h"
 #include "iree/hal/local/executable_environment.h"
 #include "iree/hal/local/local_executable_cache.h"
-#include "iree/hal/local/local_pipeline_layout.h"
 #include "iree/hal/utils/deferred_command_buffer.h"
+#include "iree/hal/utils/file_registry.h"
 #include "iree/hal/utils/file_transfer.h"
-#include "iree/hal/utils/memory_file.h"
+#include "iree/hal/utils/queue_emulation.h"
 #include "semaphore.h"
 
 typedef struct quidditch_device_t {
@@ -31,6 +31,8 @@ typedef struct quidditch_device_t {
 
   // Optional provider used for creating/configuring collective channels.
   iree_hal_channel_provider_t* channel_provider;
+
+  iree_hal_device_topology_info_t topology_info;
 
   // Block pool used for command buffers with a larger block size (as command
   // buffers can contain inlined data uploads).
@@ -219,6 +221,33 @@ static iree_status_t quidditch_device_query_i64(iree_hal_device_t* base_device,
       (int)category.size, category.data, (int)key.size, key.data);
 }
 
+static iree_status_t quidditch_device_query_capabilities(
+    iree_hal_device_t* base_device,
+    iree_hal_device_capabilities_t* out_capabilities) {
+  memset(out_capabilities, 0, sizeof(*out_capabilities));
+  return iree_ok_status();
+}
+
+static const iree_hal_device_topology_info_t* quidditch_device_topology_info(
+    iree_hal_device_t* base_device) {
+  quidditch_device_t* device = quidditch_device_cast(base_device);
+  return &device->topology_info;
+}
+
+static iree_status_t quidditch_device_refine_topology_edge(
+    iree_hal_device_t* src_device, iree_hal_device_t* dst_device,
+    iree_hal_topology_edge_t* edge) {
+  return iree_ok_status();
+}
+
+static iree_status_t quidditch_device_assign_topology_info(
+    iree_hal_device_t* base_device,
+    const iree_hal_device_topology_info_t* topology_info) {
+  quidditch_device_t* device = quidditch_device_cast(base_device);
+  device->topology_info = *topology_info;
+  return iree_ok_status();
+}
+
 static iree_status_t quidditch_device_create_channel(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_channel_params_t params, iree_hal_channel_t** out_channel) {
@@ -240,24 +269,14 @@ static iree_status_t quidditch_device_create_command_buffer(
     quidditch_device_t* device = quidditch_device_cast(base_device);
     return iree_hal_deferred_command_buffer_create(
         iree_hal_device_allocator(base_device), mode, command_categories,
-        binding_capacity, &device->large_block_pool, device->host_allocator,
-        out_command_buffer);
+        queue_affinity, binding_capacity, &device->large_block_pool,
+        device->host_allocator, out_command_buffer);
   }
 }
 
-static iree_status_t quidditch_device_create_descriptor_set_layout(
-    iree_hal_device_t* base_device,
-    iree_hal_descriptor_set_layout_flags_t flags,
-    iree_host_size_t binding_count,
-    const iree_hal_descriptor_set_layout_binding_t* bindings,
-    iree_hal_descriptor_set_layout_t** out_descriptor_set_layout) {
-  return iree_hal_local_descriptor_set_layout_create(
-      flags, binding_count, bindings,
-      iree_hal_device_host_allocator(base_device), out_descriptor_set_layout);
-}
-
 static iree_status_t quidditch_device_create_event(
-    iree_hal_device_t* base_device, iree_hal_event_t** out_event) {
+    iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
+    iree_hal_event_flags_t flags, iree_hal_event_t** out_event) {
   return quidditch_event_create(iree_hal_device_host_allocator(base_device),
                                 out_event);
 }
@@ -275,29 +294,14 @@ static iree_status_t quidditch_device_import_file(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     iree_hal_memory_access_t access, iree_io_file_handle_t* handle,
     iree_hal_external_file_flags_t flags, iree_hal_file_t** out_file) {
-  if (iree_io_file_handle_type(handle) !=
-      IREE_IO_FILE_HANDLE_TYPE_HOST_ALLOCATION) {
-    return iree_make_status(
-        IREE_STATUS_UNAVAILABLE,
-        "implementation does not support the external file type");
-  }
-  return iree_hal_memory_file_wrap(
-      queue_affinity, access, handle, iree_hal_device_allocator(base_device),
+  return iree_hal_file_from_handle(
+      iree_hal_device_allocator(base_device), queue_affinity, access, handle,
       iree_hal_device_host_allocator(base_device), out_file);
 }
 
-static iree_status_t quidditch_device_create_pipeline_layout(
-    iree_hal_device_t* base_device, iree_host_size_t push_constants,
-    iree_host_size_t set_layout_count,
-    iree_hal_descriptor_set_layout_t* const* set_layouts,
-    iree_hal_pipeline_layout_t** out_pipeline_layout) {
-  return iree_hal_local_pipeline_layout_create(
-      push_constants, set_layout_count, set_layouts,
-      iree_hal_device_host_allocator(base_device), out_pipeline_layout);
-}
-
 static iree_status_t quidditch_device_create_semaphore(
-    iree_hal_device_t* base_device, uint64_t initial_value,
+    iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
+    uint64_t initial_value, iree_hal_semaphore_flags_t flags,
     iree_hal_semaphore_t** out_semaphore) {
   quidditch_device_t* device = quidditch_device_cast(base_device);
   return quidditch_semaphore_create(&device->semaphore_state, initial_value,
@@ -316,11 +320,12 @@ static iree_status_t quidditch_device_queue_alloca(
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_allocator_pool_t pool, iree_hal_buffer_params_t params,
-    iree_device_size_t allocation_size,
+    iree_device_size_t allocation_size, iree_hal_alloca_flags_t flags,
     iree_hal_buffer_t** IREE_RESTRICT out_buffer) {
   // TODO(benvanik): queue-ordered allocations.
-  IREE_RETURN_IF_ERROR(iree_hal_semaphore_list_wait(wait_semaphore_list,
-                                                    iree_infinite_timeout()));
+  IREE_RETURN_IF_ERROR(
+      iree_hal_semaphore_list_wait(wait_semaphore_list, iree_infinite_timeout(),
+                                   IREE_HAL_WAIT_FLAG_DEFAULT));
   IREE_RETURN_IF_ERROR(
       iree_hal_allocator_allocate_buffer(iree_hal_device_allocator(base_device),
                                          params, allocation_size, out_buffer));
@@ -332,64 +337,53 @@ static iree_status_t quidditch_device_queue_dealloca(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
-    iree_hal_buffer_t* buffer) {
+    iree_hal_buffer_t* buffer, iree_hal_dealloca_flags_t flags) {
   // TODO(benvanik): queue-ordered allocations.
   IREE_RETURN_IF_ERROR(iree_hal_device_queue_barrier(
-      base_device, queue_affinity, wait_semaphore_list, signal_semaphore_list));
+      base_device, queue_affinity, wait_semaphore_list, signal_semaphore_list,
+      IREE_HAL_EXECUTE_FLAG_NONE));
   return iree_ok_status();
 }
 
-static iree_status_t quidditch_device_apply_deferred_command_buffers(
-    quidditch_device_t* device, iree_host_size_t command_buffer_count,
-    iree_hal_command_buffer_t* const* command_buffers,
-    iree_hal_buffer_binding_table_t const* binding_tables) {
-  // See if there are any deferred command buffers; this saves us work in cases
-  // of pure inline execution.
-  bool any_deferred = false;
-  for (iree_host_size_t i = 0; i < command_buffer_count && !any_deferred; ++i) {
-    any_deferred = iree_hal_deferred_command_buffer_isa(command_buffers[i]);
+static iree_status_t quidditch_device_apply_deferred_command_buffer(
+    quidditch_device_t* device, iree_hal_command_buffer_t* command_buffer,
+    iree_hal_buffer_binding_table_t binding_table) {
+  // If there were no deferred command buffers no-op this call - they've already
+  // been issued.
+  if (!command_buffer ||
+      !iree_hal_deferred_command_buffer_isa(command_buffer)) {
+    return iree_ok_status();
   }
-  if (!any_deferred) return iree_ok_status();
+
+  const iree_hal_command_buffer_mode_t mode =
+      iree_hal_command_buffer_mode(command_buffer) |
+      IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
+      IREE_HAL_COMMAND_BUFFER_MODE_ALLOW_INLINE_EXECUTION |
+      // NOTE: we need to validate if a binding table is provided as the
+      // bindings were not known when it was originally recorded.
+      (iree_hal_buffer_binding_table_is_empty(binding_table)
+           ? IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED
+           : 0);
 
   // Stack allocate storage for an inline command buffer we'll use to replay
-  // the deferred command buffers. We want to reset it between each apply so
+  // the deferred command buffer. We want to reset it between each apply so
   // that we don't get state carrying across.
+  iree_host_size_t storage_size =
+      quidditch_command_buffer_size(mode, /*binding_capacity=*/0);
   iree_byte_span_t storage =
-      iree_make_byte_span(iree_alloca(quidditch_command_buffer_size()),
-                          quidditch_command_buffer_size());
+      iree_make_byte_span(iree_alloca(storage_size), storage_size);
 
-  // NOTE: we ignore any inline command buffers that may be passed in as they've
-  // already executed during recording. The caller is probably in for a bad time
-  // if they mixed the two modes together!
-  for (iree_host_size_t i = 0; i < command_buffer_count; ++i) {
-    iree_hal_command_buffer_t* command_buffer = command_buffers[i];
-    iree_hal_buffer_binding_table_t binding_table =
-        binding_tables ? binding_tables[i]
-                       : iree_hal_buffer_binding_table_empty();
-    if (iree_hal_deferred_command_buffer_isa(command_buffer)) {
-      iree_hal_command_buffer_t* inline_command_buffer = NULL;
-      IREE_RETURN_IF_ERROR(quidditch_command_buffer_initialize(
-          (iree_hal_device_t*)device,
-          iree_hal_command_buffer_mode(command_buffer) |
-              IREE_HAL_COMMAND_BUFFER_MODE_ONE_SHOT |
-              IREE_HAL_COMMAND_BUFFER_MODE_ALLOW_INLINE_EXECUTION |
-              // NOTE: we need to validate if a binding table is provided as the
-              // bindings were not known when it was originally recorded.
-              (iree_hal_buffer_binding_table_is_empty(binding_table)
-                   ? IREE_HAL_COMMAND_BUFFER_MODE_UNVALIDATED
-                   : 0),
-          IREE_HAL_COMMAND_CATEGORY_ANY, IREE_HAL_QUEUE_AFFINITY_ANY,
-          /*binding_capacity=*/0, device->host_allocator, storage,
-          &inline_command_buffer));
-      iree_status_t status = iree_hal_deferred_command_buffer_apply(
-          command_buffer, inline_command_buffer,
-          iree_hal_buffer_binding_table_empty());
-      quidditch_command_buffer_deinitialize(inline_command_buffer);
-      IREE_RETURN_IF_ERROR(status);
-    }
-  }
-
-  return iree_ok_status();
+  iree_hal_command_buffer_t* inline_command_buffer = NULL;
+  IREE_RETURN_IF_ERROR(quidditch_command_buffer_initialize(
+      (iree_hal_device_t*)device, mode,
+      iree_hal_command_buffer_allowed_categories(command_buffer),
+      IREE_HAL_QUEUE_AFFINITY_ANY,
+      /*binding_capacity=*/0, device->host_allocator, storage,
+      &inline_command_buffer));
+  iree_status_t status = iree_hal_deferred_command_buffer_apply(
+      command_buffer, inline_command_buffer, binding_table);
+  quidditch_command_buffer_deinitialize(inline_command_buffer);
+  return status;
 }
 
 static iree_status_t quidditch_device_queue_read(
@@ -398,7 +392,7 @@ static iree_status_t quidditch_device_queue_read(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_file_t* source_file, uint64_t source_offset,
     iree_hal_buffer_t* target_buffer, iree_device_size_t target_offset,
-    iree_device_size_t length, uint32_t flags) {
+    iree_device_size_t length, iree_hal_read_flags_t flags) {
   // TODO: expose streaming chunk count/size options.
   iree_status_t loop_status = iree_ok_status();
   iree_hal_file_transfer_options_t options = {
@@ -419,7 +413,7 @@ static iree_status_t quidditch_device_queue_write(
     const iree_hal_semaphore_list_t signal_semaphore_list,
     iree_hal_buffer_t* source_buffer, iree_device_size_t source_offset,
     iree_hal_file_t* target_file, uint64_t target_offset,
-    iree_device_size_t length, uint32_t flags) {
+    iree_device_size_t length, iree_hal_write_flags_t flags) {
   // TODO: expose streaming chunk count/size options.
   iree_status_t loop_status = iree_ok_status();
   iree_hal_file_transfer_options_t options = {
@@ -434,13 +428,63 @@ static iree_status_t quidditch_device_queue_write(
   return loop_status;
 }
 
+static iree_status_t quidditch_device_queue_host_call(
+    iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
+    const iree_hal_semaphore_list_t wait_semaphore_list,
+    const iree_hal_semaphore_list_t signal_semaphore_list,
+    iree_hal_host_call_t call, const uint64_t args[4],
+    iree_hal_host_call_flags_t flags) {
+  quidditch_device_t* device = quidditch_device_cast(base_device);
+
+  // Wait for all dependencies.
+  IREE_RETURN_IF_ERROR(quidditch_semaphore_multi_wait(
+      &device->semaphore_state, IREE_HAL_WAIT_MODE_ALL, wait_semaphore_list,
+      iree_infinite_timeout()));
+
+  // If non-blocking then immediately signal the dependencies instead of letting
+  // the call do it. We don't expect this to allow more work to proceed in the
+  // sync device case _on this device_ but it may on others.
+  const bool is_nonblocking =
+      iree_any_bit_set(flags, IREE_HAL_HOST_CALL_FLAG_NON_BLOCKING);
+  if (is_nonblocking) {
+    // NOTE: the signals can fail in which case we never perform the call.
+    // That's ok as failure to signal is considered a device-loss/death
+    // situation as there's no telling what has gone wrong.
+    IREE_RETURN_IF_ERROR(quidditch_semaphore_multi_signal(
+        &device->semaphore_state, signal_semaphore_list));
+  }
+
+  // Issue the call.
+  iree_hal_host_call_context_t context = {
+      .device = base_device,
+      .queue_affinity = queue_affinity,
+      .signal_semaphore_list = is_nonblocking ? iree_hal_semaphore_list_empty()
+                                              : signal_semaphore_list,
+  };
+  iree_status_t call_status = call.fn(call.user_data, args, &context);
+
+  if (is_nonblocking || iree_status_is_deferred(call_status)) {
+    // User callback will signal in the future (or they are fire-and-forget).
+    return iree_ok_status();
+  } else if (iree_status_is_ok(call_status)) {
+    // Signal callback completed synchronously.
+    return quidditch_semaphore_multi_signal(&device->semaphore_state,
+                                            signal_semaphore_list);
+  } else {
+    // If the call failed we need to fail all dependent semaphores to propagate
+    // the error.
+    iree_hal_semaphore_list_fail(signal_semaphore_list, call_status);
+    return iree_ok_status();
+  }
+}
+
 static iree_status_t quidditch_device_queue_execute(
     iree_hal_device_t* base_device, iree_hal_queue_affinity_t queue_affinity,
     const iree_hal_semaphore_list_t wait_semaphore_list,
     const iree_hal_semaphore_list_t signal_semaphore_list,
-    iree_host_size_t command_buffer_count,
-    iree_hal_command_buffer_t* const* command_buffers,
-    iree_hal_buffer_binding_table_t const* binding_tables) {
+    iree_hal_command_buffer_t* command_buffer,
+    iree_hal_buffer_binding_table_t binding_table,
+    iree_hal_execute_flags_t flags) {
   quidditch_device_t* device = quidditch_device_cast(base_device);
 
   // TODO(#4680): there is some better error handling here needed; we should
@@ -455,8 +499,8 @@ static iree_status_t quidditch_device_queue_execute(
 
   // Run all deferred command buffers - any we could have run inline we already
   // did during recording.
-  IREE_RETURN_IF_ERROR(quidditch_device_apply_deferred_command_buffers(
-      device, command_buffer_count, command_buffers, binding_tables));
+  IREE_RETURN_IF_ERROR(quidditch_device_apply_deferred_command_buffer(
+      device, command_buffer, binding_table));
 
   // Signal all semaphores now that batch work has completed.
   IREE_RETURN_IF_ERROR(quidditch_semaphore_multi_signal(
@@ -473,7 +517,8 @@ static iree_status_t quidditch_device_queue_flush(
 
 static iree_status_t quidditch_device_wait_semaphores(
     iree_hal_device_t* base_device, iree_hal_wait_mode_t wait_mode,
-    const iree_hal_semaphore_list_t semaphore_list, iree_timeout_t timeout) {
+    const iree_hal_semaphore_list_t semaphore_list, iree_timeout_t timeout,
+    iree_hal_wait_flags_t flags) {
   quidditch_device_t* device = quidditch_device_cast(base_device);
   return quidditch_semaphore_multi_wait(&device->semaphore_state, wait_mode,
                                         semaphore_list, timeout);
@@ -514,21 +559,27 @@ static const iree_hal_device_vtable_t quidditch_device_vtable = {
     .replace_channel_provider = quidditch_replace_channel_provider,
     .trim = quidditch_device_trim,
     .query_i64 = quidditch_device_query_i64,
+    .query_capabilities = quidditch_device_query_capabilities,
+    .topology_info = quidditch_device_topology_info,
+    .refine_topology_edge = quidditch_device_refine_topology_edge,
+    .assign_topology_info = quidditch_device_assign_topology_info,
     .create_channel = quidditch_device_create_channel,
     .create_command_buffer = quidditch_device_create_command_buffer,
-    .create_descriptor_set_layout =
-        quidditch_device_create_descriptor_set_layout,
     .create_event = quidditch_device_create_event,
     .create_executable_cache = quidditch_device_create_executable_cache,
     .import_file = quidditch_device_import_file,
-    .create_pipeline_layout = quidditch_device_create_pipeline_layout,
     .create_semaphore = quidditch_device_create_semaphore,
     .query_semaphore_compatibility =
         quidditch_device_query_semaphore_compatibility,
     .queue_alloca = quidditch_device_queue_alloca,
     .queue_dealloca = quidditch_device_queue_dealloca,
+    .queue_fill = iree_hal_device_queue_emulated_fill,
+    .queue_update = iree_hal_device_queue_emulated_update,
+    .queue_copy = iree_hal_device_queue_emulated_copy,
     .queue_read = quidditch_device_queue_read,
     .queue_write = quidditch_device_queue_write,
+    .queue_host_call = quidditch_device_queue_host_call,
+    .queue_dispatch = iree_hal_device_queue_emulated_dispatch,
     .queue_execute = quidditch_device_queue_execute,
     .queue_flush = quidditch_device_queue_flush,
     .wait_semaphores = quidditch_device_wait_semaphores,

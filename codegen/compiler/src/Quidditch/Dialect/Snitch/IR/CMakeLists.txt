@@ -33,7 +33,9 @@ iree_cc_library(
         MLIRIR
         MLIRInferTypeOpInterface
         MLIRSupport
+        MLIRValueBoundsOpInterface
         iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
+        iree::compiler::Dialect::HAL::IR
         PUBLIC
 )
 

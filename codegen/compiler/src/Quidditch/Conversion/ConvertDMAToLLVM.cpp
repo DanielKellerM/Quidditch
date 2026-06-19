@@ -147,10 +147,10 @@ struct StartContiguousZeroMemTransferOpOpLowering
     if (!isContiguous(op.getFilled().getType()))
       return failure();
 
+    Value zeroAddress = rewriter.create<LLVM::ConstantOp>(
+        op->getLoc(), rewriter.getI32IntegerAttr(zeroMemAddress));
     Value zeroPointer = rewriter.create<LLVM::IntToPtrOp>(
-        op->getLoc(), rewriter.getType<LLVM::LLVMPointerType>(),
-        rewriter.create<LLVM::ConstantOp>(
-            op->getLoc(), rewriter.getI32IntegerAttr(zeroMemAddress)));
+        op->getLoc(), rewriter.getType<LLVM::LLVMPointerType>(), zeroAddress);
     Value zeroMemSizeValue = rewriter.create<LLVM::ConstantOp>(
         op->getLoc(), rewriter.getI32IntegerAttr(zeroMemSize));
 
@@ -339,6 +339,7 @@ struct StatOpLowering : ConvertOpToLLVMPattern<SnitchDMA::StatOp> {
         ".insn r 0x2b, 0, 0b100, $0, zero, zero\n",
         /*constraints=*/"=r",
         /*has_side_effects=*/true, /*is_align_stack=*/false,
+        /*tail_call_kind=*/LLVM::TailCallKind::None,
         /*asm_dialect=*/nullptr, /*operand_attrs=*/nullptr);
     return success();
   }

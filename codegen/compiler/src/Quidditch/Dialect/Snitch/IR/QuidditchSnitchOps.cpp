@@ -1,5 +1,6 @@
 #include "QuidditchSnitchOps.h"
 
+#include "iree/compiler/Dialect/HAL/IR/HALOps.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
@@ -7,6 +8,7 @@
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/TypeUtilities.h"
+#include "mlir/Interfaces/ValueBoundsOpInterface.h"
 
 #include "QuidditchSnitchAttrs.h"
 
@@ -62,7 +64,13 @@ void TensorMicrokernelOp::getSuccessorRegions(
     regions.emplace_back(&getBody());
     return;
   }
-  regions.emplace_back(getResults());
+  regions.push_back(RegionSuccessor::parent());
+}
+
+ValueRange TensorMicrokernelOp::getSuccessorInputs(RegionSuccessor successor) {
+  if (successor.isParent())
+    return getResults();
+  return {};
 }
 
 void TensorMicrokernelOp::getRegionInvocationBounds(
@@ -85,28 +93,31 @@ TensorMicrokernelOp::getAliasingOpOperands(Value value,
   }};
 }
 
-FailureOr<BaseMemRefType>
+FailureOr<BufferLikeType>
 TensorMicrokernelOp::getBufferType(Value value,
                                    const BufferizationOptions &options,
+                                   const BufferizationState &state,
                                    SmallVector<Value> &invocationStack) {
   Value corresponding =
       getYieldOp().getResults()[cast<OpResult>(value).getResultNumber()];
-  if (auto memRefType = dyn_cast<BaseMemRefType>(corresponding.getType()))
-    return memRefType;
+  if (auto bufferType = dyn_cast<BufferLikeType>(corresponding.getType()))
+    return bufferType;
 
-  return bufferization::getBufferType(corresponding, options, invocationStack);
+  return bufferization::getBufferType(corresponding, options, state,
+                                      invocationStack);
 }
 
 LogicalResult
 TensorMicrokernelOp::bufferize(RewriterBase &rewriter,
-                               const BufferizationOptions &options) {
+                               const BufferizationOptions &options,
+                               BufferizationState &state) {
   SmallVector<Value> newYields;
   for (Value result : getYieldOp().getResults()) {
     if (!isa<TensorType>(result.getType())) {
       newYields.push_back(result);
       continue;
     }
-    auto bufferType = bufferization::getBuffer(rewriter, result, options);
+    auto bufferType = bufferization::getBuffer(rewriter, result, options, state);
     if (failed(bufferType))
       return failure();
     newYields.push_back(*bufferType);
@@ -116,7 +127,7 @@ TensorMicrokernelOp::bufferize(RewriterBase &rewriter,
   WalkResult walkResult = walk([&](Operation *operation) {
     for (Value value : operation->getOperands()) {
       if (isa<TensorType>(value.getType())) {
-        FailureOr<Value> newInput = getBuffer(rewriter, value, options);
+        FailureOr<Value> newInput = getBuffer(rewriter, value, options, state);
         if (failed(newInput))
           return WalkResult::interrupt();
         value = *newInput;
@@ -184,7 +195,8 @@ bool MicrokernelYieldOp::mustBufferizeInPlace(OpOperand &,
 
 LogicalResult
 MicrokernelYieldOp::bufferize(RewriterBase &rewriter,
-                              const BufferizationOptions &options) {
+                              const BufferizationOptions &options,
+                              BufferizationState &state) {
   SmallVector<Value> newResults;
   for (auto &&[index, value] : llvm::enumerate(getResults())) {
     if (!isa<TensorType>(value.getType())) {
@@ -192,7 +204,7 @@ MicrokernelYieldOp::bufferize(RewriterBase &rewriter,
       continue;
     }
 
-    FailureOr<Value> maybeBuffer = getBuffer(rewriter, value, options);
+    FailureOr<Value> maybeBuffer = getBuffer(rewriter, value, options, state);
     if (failed(maybeBuffer))
       return failure();
 
@@ -235,8 +247,10 @@ bool SyncTensorOp::mustBufferizeInPlace(OpOperand &opOperand,
 }
 
 LogicalResult SyncTensorOp::bufferize(RewriterBase &rewriter,
-                                      const BufferizationOptions &options) {
-  FailureOr<Value> inputTensorBuffer = getBuffer(rewriter, getInput(), options);
+                                      const BufferizationOptions &options,
+                                      BufferizationState &state) {
+  FailureOr<Value> inputTensorBuffer =
+      getBuffer(rewriter, getInput(), options, state);
   if (failed(inputTensorBuffer))
     return failure();
 
@@ -375,7 +389,7 @@ bool CallMicrokernelOp::supportsArgumentType(mlir::Type type) {
 
   int64_t offset = 0;
   SmallVector<int64_t, 4> strides;
-  if (failed(getStridesAndOffset(memRef, strides, offset)))
+  if (failed(memRef.getStridesAndOffset(strides, offset)))
     return false;
 
   return llvm::none_of(strides, ShapedType::isDynamic);
@@ -408,6 +422,30 @@ void ComputeCoreIndexOp::replaceWithNoop(RewriterBase &rewriter) {
   // flow is therefore safe to do.
   // This is mainly required for barriers within a `scf.forall`.
   rewriter.replaceOpWithNewOp<arith::ConstantIndexOp>(*this, 0);
+}
+
+//===----------------------------------------------------------------------===//
+// ComputeCoreIndexOp::ValueBoundsOpInterface
+//===----------------------------------------------------------------------===//
+
+void ComputeCoreIndexOp::populateBoundsForIndexValue(
+    Value value, ValueBoundsConstraintSet &cstr) {
+  assert(value == getResult() && "expected the op's result");
+
+  // The result is in the range `[0, compute_cores - 1]` where `compute_cores`
+  // is an `IntegerAttr` in the surrounding `ExecutableTargetAttr`. The lower
+  // bound holds unconditionally; the upper bound is only known if the target
+  // configuration is available.
+  cstr.bound(value) >= 0;
+
+  auto targetAttr =
+      mlir::iree_compiler::IREE::HAL::ExecutableTargetAttr::lookup(*this);
+  IntegerAttr computeCoresAttr =
+      targetAttr && targetAttr.getConfiguration()
+          ? targetAttr.getConfiguration().getAs<IntegerAttr>("compute_cores")
+          : nullptr;
+  if (computeCoresAttr)
+    cstr.bound(value) <= computeCoresAttr.getValue().getSExtValue() - 1;
 }
 
 //===----------------------------------------------------------------------===//
@@ -654,27 +692,31 @@ PipelineOp::inferReturnTypes(MLIRContext *context,
 
 void PipelineOp::getSuccessorRegions(
     RegionBranchPoint point, SmallVectorImpl<RegionSuccessor> &regions) {
-  auto addRegion = [&](Region &region) {
-    regions.emplace_back(&region, region.getArguments().drop_front());
-  };
-
   if (point.isParent()) {
-    addRegion(getStages().front());
-    regions.emplace_back(getResults());
+    regions.emplace_back(&getStages().front());
+    regions.push_back(RegionSuccessor::parent());
     return;
   }
 
-  unsigned index = point.getRegionOrNull()->getRegionNumber();
+  unsigned index = point.getTerminatorPredecessorOrNull()
+                       ->getParentRegion()
+                       ->getRegionNumber();
   if (index + 1 == getStages().size()) {
-    addRegion(getStages().front());
-    regions.emplace_back(getResults());
+    regions.emplace_back(&getStages().front());
+    regions.push_back(RegionSuccessor::parent());
     return;
   }
 
-  addRegion(getStages()[index + 1]);
+  regions.emplace_back(&getStages()[index + 1]);
 }
 
-OperandRange PipelineOp::getEntrySuccessorOperands(RegionBranchPoint point) {
+ValueRange PipelineOp::getSuccessorInputs(RegionSuccessor successor) {
+  if (successor.isParent())
+    return getResults();
+  return successor.getSuccessor()->getArguments().drop_front();
+}
+
+OperandRange PipelineOp::getEntrySuccessorOperands(RegionSuccessor successor) {
   return getInitArgs();
 }
 
@@ -705,52 +747,57 @@ PipelineOp::getAliasingValues(OpOperand &opOperand,
   return {{getTiedResult(opOperand), BufferRelation::Equivalent}};
 }
 
-FailureOr<BaseMemRefType>
+FailureOr<BufferLikeType>
 PipelineOp::getBufferType(Value value,
                           const bufferization::BufferizationOptions &options,
+                          const bufferization::BufferizationState &state,
                           SmallVector<Value> &invocationStack) {
   if (auto opResult = dyn_cast<OpResult>(value))
     return bufferization::getBufferType(getTiedEntryIterArg(opResult), options,
-                                        invocationStack);
+                                        state, invocationStack);
 
   auto argument = cast<BlockArgument>(value);
   if (argument.getParentRegion()->getRegionNumber() != 0) {
     Value yielded = getTiedYielded(argument).get();
-    if (auto memRef = dyn_cast<BaseMemRefType>(yielded.getType()))
-      return memRef;
+    if (auto buffer = dyn_cast<BufferLikeType>(yielded.getType()))
+      return buffer;
 
-    return bufferization::getBufferType(yielded, options, invocationStack);
+    return bufferization::getBufferType(yielded, options, state,
+                                        invocationStack);
   }
 
-  FailureOr<BaseMemRefType> initType = bufferization::getBufferType(
-      getTiedInit(argument).get(), options, invocationStack);
+  FailureOr<BaseMemRefType> initType =
+      bufferization::detail::asMemRefType(bufferization::getBufferType(
+          getTiedInit(argument).get(), options, state, invocationStack));
   if (failed(initType))
     return failure();
 
   if (llvm::is_contained(invocationStack, argument))
-    return initType;
+    return cast<BufferLikeType>(*initType);
 
   Value yieldedValue = getTiedYielded(argument).get();
   BaseMemRefType yieldedType = dyn_cast<BaseMemRefType>(yieldedValue.getType());
   if (!yieldedType) {
     FailureOr<BaseMemRefType> maybeYieldedType =
-        bufferization::getBufferType(yieldedValue, options, invocationStack);
+        bufferization::detail::asMemRefType(bufferization::getBufferType(
+            yieldedValue, options, state, invocationStack));
     if (failed(maybeYieldedType))
       return failure();
 
     yieldedType = *maybeYieldedType;
   }
 
-  if (yieldedType == initType)
-    return yieldedType;
+  if (yieldedType == *initType)
+    return cast<BufferLikeType>(yieldedType);
 
-  return getMemRefTypeWithFullyDynamicLayout(
-      cast<TensorType>(argument.getType()), yieldedType.getMemorySpace());
+  return cast<BufferLikeType>(getMemRefTypeWithFullyDynamicLayout(
+      cast<TensorType>(argument.getType()), yieldedType.getMemorySpace()));
 }
 
 static FailureOr<SmallVector<Value>>
 getBuffers(ValueRange values, RewriterBase &rewriter,
-           const bufferization::BufferizationOptions &options) {
+           const bufferization::BufferizationOptions &options,
+           bufferization::BufferizationState &state) {
   SmallVector<Value> result;
   for (Value old : values) {
     if (!isa<TensorType>(old.getType())) {
@@ -759,7 +806,7 @@ getBuffers(ValueRange values, RewriterBase &rewriter,
     }
 
     FailureOr<Value> maybeBuffer =
-        bufferization::getBuffer(rewriter, old, options);
+        bufferization::getBuffer(rewriter, old, options, state);
     if (failed(maybeBuffer))
       return failure();
 
@@ -771,9 +818,10 @@ getBuffers(ValueRange values, RewriterBase &rewriter,
 
 LogicalResult
 PipelineOp::bufferize(RewriterBase &rewriter,
-                      const bufferization::BufferizationOptions &options) {
+                      const bufferization::BufferizationOptions &options,
+                      bufferization::BufferizationState &state) {
   FailureOr<SmallVector<Value>> inits =
-      getBuffers(getInitArgs(), rewriter, options);
+      getBuffers(getInitArgs(), rewriter, options, state);
   if (failed(inits))
     return failure();
 
@@ -801,19 +849,21 @@ PipelineOp::bufferize(RewriterBase &rewriter,
       // they must disappear entirely.
       if (oldRegion.getRegionNumber() == 0) {
         Value init = (*inits)[arg.getArgNumber() - 1];
-        replacements.push_back(
-            rewriter.create<bufferization::ToTensorOp>(init.getLoc(), init));
+        replacements.push_back(rewriter.create<bufferization::ToTensorOp>(
+            init.getLoc(),
+            memref::getTensorTypeFromMemRefType(init.getType()), init));
         continue;
       }
 
-      FailureOr<BaseMemRefType> memRef =
-          bufferization::getBufferType(arg, options);
+      FailureOr<BaseMemRefType> memRef = bufferization::detail::asMemRefType(
+          bufferization::getBufferType(arg, options, state));
       if (failed(memRef))
         return failure();
 
       BlockArgument newArg = newBlock.addArgument(*memRef, arg.getLoc());
-      replacements.push_back(
-          rewriter.create<bufferization::ToTensorOp>(newArg.getLoc(), newArg));
+      replacements.push_back(rewriter.create<bufferization::ToTensorOp>(
+          newArg.getLoc(),
+          memref::getTensorTypeFromMemRefType(newArg.getType()), newArg));
     }
     perRegionReplacements.push_back(std::move(replacements));
   }
@@ -862,7 +912,7 @@ SmallVector<Region *> PipelineOp::getLoopRegions() {
 void PipelineOp::moveOutOfLoop(Operation *op) {
   Block *block = op->getBlock();
   auto yieldOp = cast<PipelineYieldOp>(block->getTerminator());
-  if (op->getParentRegion() != getStages().back())
+  if (op->getParentRegion() != &getStages().back())
     for (OpOperand &operand : yieldOp.getResultsMutable())
       if (operand.get().getDefiningOp() == op)
         yieldOp.getTiedBlockArgument(operand).replaceAllUsesWith(operand.get());
@@ -912,9 +962,10 @@ PipelineYieldOp::getAliasingValues(OpOperand &opOperand,
 
 LogicalResult
 PipelineYieldOp::bufferize(RewriterBase &rewriter,
-                           const bufferization::BufferizationOptions &options) {
+                           const bufferization::BufferizationOptions &options,
+                           bufferization::BufferizationState &state) {
   FailureOr<SmallVector<Value>> buffers =
-      getBuffers(getResults(), rewriter, options);
+      getBuffers(getResults(), rewriter, options, state);
   if (failed(buffers))
     return failure();
 

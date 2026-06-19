@@ -400,8 +400,14 @@ void PadToTilingConfig::runOnOperation() {
     workList.push_back(linalgOp);
   });
 
-  std::optional<IntegerAttr> attr = getConfigIntegerAttr(
-      IREE::HAL::ExecutableTargetAttr::lookup(getOperation()), "compute_cores");
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(getOperation());
+  IntegerAttr computeCoresAttr =
+      targetAttr && targetAttr.getConfiguration()
+          ? targetAttr.getConfiguration().getAs<IntegerAttr>("compute_cores")
+          : nullptr;
+  std::optional<IntegerAttr> attr =
+      computeCoresAttr ? std::optional<IntegerAttr>(computeCoresAttr)
+                       : std::nullopt;
 
   // Pad every linalg op to a multiple of all applied tile sizes.
   for (linalg::LinalgOp &linalgOp : workList)
@@ -416,7 +422,7 @@ void PadToTilingConfig::runOnOperation() {
     patterns.insert<OptimizeElementwisePad, PropagateUnusedOutputPads,
                     OptimizeContractionOutputPad>(&getContext());
     if (failed(
-            applyPatternsAndFoldGreedily(getOperation(), std::move(patterns))))
+            applyPatternsGreedily(getOperation(), std::move(patterns))))
       return signalPassFailure();
   }
 
@@ -430,7 +436,7 @@ void PadToTilingConfig::runOnOperation() {
     tensor::PadOp::getCanonicalizationPatterns(patterns, &getContext());
     patterns.insert<ExpandPaddedEmptyOp, ExpandPaddedSlice>(&getContext());
     if (failed(
-            applyPatternsAndFoldGreedily(getOperation(), std::move(patterns))))
+            applyPatternsGreedily(getOperation(), std::move(patterns))))
       return signalPassFailure();
   }
 }

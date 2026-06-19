@@ -62,8 +62,11 @@ static SmallVector<OpFoldResult>
 threadTileSizeComputation(OpBuilder &builder, Operation *operation) {
   SmallVector<OpFoldResult> result;
 
-  std::optional<IntegerAttr> attr = getConfigIntegerAttr(
-      IREE::HAL::ExecutableTargetAttr::lookup(operation), "compute_cores");
+  auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(operation);
+  IntegerAttr attr =
+      targetAttr && targetAttr.getConfiguration()
+          ? targetAttr.getConfiguration().getAs<IntegerAttr>("compute_cores")
+          : nullptr;
   if (!attr)
     return result;
 
@@ -104,7 +107,7 @@ threadTileSizeComputation(OpBuilder &builder, Operation *operation) {
   if (largestParallelDim) {
     assert(largestParallelSize);
     result[*largestParallelDim] = builder.getIndexAttr(llvm::divideCeil(
-        *largestParallelSize, attr->getValue().getSExtValue()));
+        *largestParallelSize, attr.getValue().getSExtValue()));
   }
   return result;
 }
@@ -166,17 +169,21 @@ applyTileAndFuseToEachRoot(RewriterBase &rewriter,
 
     scf::SCFTileAndFuseOptions::ControlFnTy controlFn =
         [&](tensor::ExtractSliceOp candidateSliceOp, OpResult originalProducer,
-            bool isDestinationOperand) {
-          Operation *owner = originalProducer.getOwner();
-          bool yieldProducerReplacement = yieldReplacementsFor.contains(owner);
-          bool shouldFuse = false;
-          if (auto tilingOwner = dyn_cast<TilingInterface>(owner)) {
-            shouldFuse = !payloadOps.contains(tilingOwner);
-          }
-          // Do not fuse destination operands.
-          shouldFuse &= !isDestinationOperand;
-          return std::make_tuple(shouldFuse, yieldProducerReplacement);
-        };
+            bool isDestinationOperand)
+        -> std::optional<scf::SCFTileAndFuseOptions::ControlFnResult> {
+      Operation *owner = originalProducer.getOwner();
+      bool yieldProducerReplacement = yieldReplacementsFor.contains(owner);
+      bool shouldFuse = false;
+      if (auto tilingOwner = dyn_cast<TilingInterface>(owner)) {
+        shouldFuse = !payloadOps.contains(tilingOwner);
+      }
+      // Do not fuse destination operands.
+      shouldFuse &= !isDestinationOperand;
+      if (!shouldFuse)
+        return std::nullopt;
+      return scf::SCFTileAndFuseOptions::ControlFnResult{
+          yieldProducerReplacement};
+    };
     tileAndFuseOptions.setFusionControlFn(controlFn);
 
     FailureOr<scf::SCFTileAndFuseResult> tiledResults =
@@ -239,7 +246,7 @@ void TensorTile::runOnOperation() {
     tensor::populateMergeConsecutiveInsertExtractSlicePatterns(patterns);
     tensor::InsertSliceOp::getCanonicalizationPatterns(patterns, context);
     tensor::ExtractSliceOp::getCanonicalizationPatterns(patterns, context);
-    if (failed(applyPatternsAndFoldGreedily(funcOp, std::move(patterns)))) {
+    if (failed(applyPatternsGreedily(funcOp, std::move(patterns)))) {
       funcOp.emitError() << "tiling cleanup failed\n";
       return signalPassFailure();
     }

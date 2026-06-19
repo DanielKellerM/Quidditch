@@ -9,16 +9,27 @@
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <sync_decls.h>
 #include <team_decls.h>
+
+// snRuntime sync (sync_decls.h is C++-only since the DCA/collective refactor:
+// it uses C++ default arguments). The symbol is re-exported with C linkage by
+// runtime/snitch_cluster/rtl/src/quidditch_snrt_exports.cc.
+extern void snrt_cluster_hw_barrier(void);
 
 // TODO: This only works for a single cluster by using globals. Should be
 // cluster local.
 static iree_hal_executable_dispatch_v0_t configuredKernel;
 static const iree_hal_executable_environment_v0_t* configuredEnvironment;
 static const iree_hal_executable_dispatch_state_v0_t* configuredDispatchState;
+// Initialize processor_id to the "no workgroup assigned" sentinel (-1) so that
+// workers woken by the DM core's init-time cluster barriers (before the first
+// real dispatch) skip execution instead of calling a not-yet-configured (null)
+// kernel. This mirrors the state reset_workgroup_state() establishes between
+// dispatches.
 static iree_alignas(64)
-    iree_hal_executable_workgroup_state_v0_t configuredWorkgroupState[8];
+    iree_hal_executable_workgroup_state_v0_t configuredWorkgroupState[8] = {
+        [0 ... 7] = {.processor_id = (uint32_t)-1},
+};
 static atomic_bool error = false;
 static atomic_bool exit = false;
 static uint8_t nextCoreToUse = 0;
