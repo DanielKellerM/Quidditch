@@ -12,14 +12,10 @@
 #include <iree/modules/hal/types.h>
 #include <iree/vm/instance.h>
 
+#include <string.h>
+
 #include <stack_decls.h>
 #include <team_decls.h>
-
-// snRuntime iDMA (internal API — not exported in snRuntime/api/; symbols live in
-// libsnRuntime via the extern-inline in src/dma.c). Phase-4 buffer-marshaling offload (§21).
-typedef uint32_t snrt_dma_txid_t;
-extern snrt_dma_txid_t snrt_dma_start_1d(void *dst, const void *src, size_t size);
-extern void snrt_dma_wait_all(void);
 
 static iree_status_t setup_instance_and_device(
     const model_config_t* config, iree_allocator_t host_allocator,
@@ -157,10 +153,8 @@ iree_status_t run_model(const model_config_t* config) {
         iree_vm_list_get_ref_deref(outputs, i, iree_hal_buffer_view_type());
     if (ret_buffer_view == NULL) goto error_release_output;
 
-    // §21 Phase-4(A): offload the output download to the iDMA. The old path was
-    // iree_hal_device_transfer_d2h -> map + scalar memcpy on the DM core (the 52%).
-    // "Device" memory is host memory (heap allocator), so map gives a direct pointer
-    // and the iDMA copies host->host (L3->L3) far faster than scalar memcpy.
+    // Device memory is host memory (heap allocator), so map yields a direct
+    // pointer; copy the result out with memcpy.
     iree_device_size_t nbytes =
         config->output_sizes[i] *
         iree_hal_element_dense_byte_count(config->element_type);
@@ -169,8 +163,7 @@ iree_status_t run_model(const model_config_t* config) {
         iree_hal_buffer_view_buffer(ret_buffer_view),
         IREE_HAL_MAPPING_MODE_SCOPED, IREE_HAL_MEMORY_ACCESS_READ,
         /*byte_offset=*/0, nbytes, &mapping));
-    snrt_dma_start_1d(config->output_data[i], mapping.contents.data, nbytes);
-    snrt_dma_wait_all();
+    memcpy(config->output_data[i], mapping.contents.data, nbytes);
     iree_hal_buffer_unmap_range(&mapping);
   }
 
