@@ -112,20 +112,37 @@ makeDispatchFunctionType(llvm::LLVMContext &context) {
 }
 
 // %struct.iree_hal_executable_dispatch_attrs_v0_t = type {
-//   i16,
-//   i16
+//   i64,        ; flags
+//   i16,        ; local_memory_pages
+//   i8,         ; constant_count
+//   i8,         ; binding_count
+//   i32, i32,   ; workgroup_size_x, workgroup_size_y
+//   i16,        ; workgroup_size_z
+//   i16,        ; parameter_count
+//   [5 x i64]   ; reserved_1
 // }
 static llvm::StructType *makeDispatchAttrsType(llvm::LLVMContext &context) {
   if (auto *existingType = llvm::StructType::getTypeByName(
           context, "iree_hal_executable_dispatch_attrs_v0_t")) {
     return existingType;
   }
+  auto *i8Type = llvm::IntegerType::getInt8Ty(context);
   auto *i16Type = llvm::IntegerType::getInt16Ty(context);
+  auto *i32Type = llvm::IntegerType::getInt32Ty(context);
+  auto *i64Type = llvm::IntegerType::getInt64Ty(context);
   auto *type =
       llvm::StructType::create(context,
                                {
-                                   i16Type,
-                                   i16Type,
+                                   i64Type, // flags
+                                   i16Type, // local_memory_pages
+                                   i8Type,  // constant_count
+                                   i8Type,  // binding_count
+                                   i32Type, // workgroup_size_x
+                                   i32Type, // workgroup_size_y
+                                   i16Type, // workgroup_size_z
+                                   i16Type, // parameter_count
+                                   i64Type, i64Type, i64Type, i64Type,
+                                   i64Type, // reserved_1[5]
                                },
                                "iree_hal_executable_dispatch_attrs_v0_t",
                                /*isPacked=*/false);
@@ -183,14 +200,17 @@ makeStageLocationTableType(llvm::LLVMContext &context) {
 }
 
 // %struct.quidditch_executable_export_table_v0_t = type {
-//   i32,
-//   %struct.iree_hal_executable_dispatch_v0_t**,
-//   %struct.iree_hal_executable_dispatch_attrs_v0_t*,
-//   i8**,
-//   i8**,
-//   %struct.iree_hal_executable_source_location_v0_t*,
-//   %struct.iree_hal_executable_stage_location_table_v0_t*,
-//   %struct.iree_hal_executable_dispatch_v0_t*,
+//   i32,                                                    ; count
+//   %struct.iree_hal_executable_dispatch_v0_t**,            ; ptrs
+//   %struct.iree_hal_executable_dispatch_attrs_v0_t*,       ; attrs
+//   i8*,                                                    ; params (unused)
+//   i8*,                                                    ; occupancy (unused)
+//   i8**,                                                   ; names
+//   i8**,                                                   ; tags
+//   i8*,                                                    ; parameter_names (unused)
+//   %struct.iree_hal_executable_source_location_v0_t*,      ; source_locations
+//   %struct.iree_hal_executable_stage_location_table_v0_t*, ; stage_locations
+//   %struct.iree_hal_executable_dispatch_v0_t**,            ; dma_core_ptrs (Quidditch)
 // }
 static llvm::StructType *makeExportTableType(llvm::LLVMContext &context) {
   if (auto *existingType = llvm::StructType::getTypeByName(
@@ -209,8 +229,11 @@ static llvm::StructType *makeExportTableType(llvm::LLVMContext &context) {
           i32Type,
           dispatchFunctionType->getPointerTo()->getPointerTo(),
           dispatchAttrsType->getPointerTo(),
+          i8PtrType, // params (v0.6, unused -> NULL)
+          i8PtrType, // occupancy (v0.6, unused -> NULL)
           i8PtrType->getPointerTo(),
           i8PtrType->getPointerTo(),
+          i8PtrType, // parameter_names (v0.6, unused -> NULL)
           sourceLocationType->getPointerTo(),
           stageLocationTableType->getPointerTo(),
           dispatchFunctionType->getPointerTo()->getPointerTo(),
@@ -501,29 +524,44 @@ LibraryBuilder::buildLibraryV0ExportTable(std::string libraryName) {
       exportPtrValues, module);
 
   // iree_hal_executable_export_table_v0_t::attrs
-  llvm::Constant *exportAttrs =
-      llvm::Constant::getNullValue(i32Type->getPointerTo());
-  bool hasNonDefaultAttrs = llvm::any_of(exports, [](const auto &dispatch) {
-    return !dispatch.attrs.isDefault();
-  });
-  if (!hasNonDefaultAttrs) {
-    SmallVector<llvm::Constant *> exportAttrValues;
-    for (auto dispatch : exports) {
-      exportAttrValues.push_back(llvm::ConstantStruct::get(
-          dispatchAttrsType,
-          {
-              // local_memory_pages=
-              llvm::ConstantInt::get(
-                  i16Type, roundUpToAlignment(dispatch.attrs.localMemorySize,
-                                              kWorkgroupLocalMemoryPageSize) /
-                               kWorkgroupLocalMemoryPageSize),
-              // reserved=
-              llvm::ConstantInt::get(i16Type, 0),
-          }));
-    }
-    exportAttrs = createArrayConstant(libraryName + "_attrs", dispatchAttrsType,
-                                      exportAttrValues, module);
+  // v0.6 always populates the attrs table (the runtime reads
+  // local_memory_pages / constant_count / binding_count per dispatch).
+  auto *i64Type = llvm::IntegerType::getInt64Ty(context);
+  SmallVector<llvm::Constant *> exportAttrValues;
+  for (const Dispatch &dispatch : exports) {
+    exportAttrValues.push_back(llvm::ConstantStruct::get(
+        dispatchAttrsType,
+        {
+            // flags=
+            llvm::ConstantInt::get(
+                i64Type, static_cast<uint64_t>(dispatch.attrs.flags)),
+            // local_memory_pages=
+            llvm::ConstantInt::get(
+                i16Type, roundUpToAlignment(dispatch.attrs.localMemorySize,
+                                            kWorkgroupLocalMemoryPageSize) /
+                             kWorkgroupLocalMemoryPageSize),
+            // constant_count=
+            llvm::ConstantInt::get(i8Type, dispatch.attrs.constantCount),
+            // binding_count=
+            llvm::ConstantInt::get(i8Type, dispatch.attrs.bindingCount),
+            // workgroup_size_x=
+            llvm::ConstantInt::get(i32Type, dispatch.attrs.workgroupSize[0]),
+            // workgroup_size_y=
+            llvm::ConstantInt::get(i32Type, dispatch.attrs.workgroupSize[1]),
+            // workgroup_size_z=
+            llvm::ConstantInt::get(i16Type, dispatch.attrs.workgroupSize[2]),
+            // parameter_count=
+            llvm::ConstantInt::get(i16Type, 0),
+            // reserved_1[5]=
+            llvm::ConstantInt::get(i64Type, 0),
+            llvm::ConstantInt::get(i64Type, 0),
+            llvm::ConstantInt::get(i64Type, 0),
+            llvm::ConstantInt::get(i64Type, 0),
+            llvm::ConstantInt::get(i64Type, 0),
+        }));
   }
+  llvm::Constant *exportAttrs = createArrayConstant(
+      libraryName + "_attrs", dispatchAttrsType, exportAttrValues, module);
 
   // iree_hal_executable_export_table_v0_t::names
   llvm::Constant *exportNames =
@@ -634,6 +672,10 @@ LibraryBuilder::buildLibraryV0ExportTable(std::string libraryName) {
       libraryName + "_dma_core_ptrs", dispatchAttrsType->getPointerTo(),
       dmaCorePtrs, module);
 
+  // v0.6 export-table slots Quidditch does not populate.
+  llvm::Constant *nullPtr =
+      llvm::Constant::getNullValue(llvm::PointerType::getUnqual(context));
+
   return llvm::ConstantStruct::get(
       exportTableType, {
                            // count=
@@ -642,10 +684,16 @@ LibraryBuilder::buildLibraryV0ExportTable(std::string libraryName) {
                            exportPtrs,
                            // attrs=
                            exportAttrs,
+                           // params= (v0.6, unused)
+                           nullPtr,
+                           // occupancy= (v0.6, unused)
+                           nullPtr,
                            // names=
                            exportNames,
                            // tags=
                            exportTags,
+                           // parameter_names= (v0.6, unused)
+                           nullPtr,
                            // source_locations=
                            exportSourceLocations,
                            // stage_locations=

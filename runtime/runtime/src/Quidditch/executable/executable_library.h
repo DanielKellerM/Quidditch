@@ -28,6 +28,13 @@ typedef struct quidditch_executable_export_table_v0_t {
   // memory (or whatever else we pack into the attributes).
   const iree_hal_executable_dispatch_attrs_v0_t* attrs;
 
+  // Optional parameter declarations per entry point (v0.6; unused here, but the
+  // slot must exist so the field offsets below match the compiler's emission).
+  const iree_hal_executable_dispatch_parameter_v0_t** params;
+
+  // Optional occupancy information (v0.6; unused here).
+  const iree_hal_executable_dispatch_occupancy_v0_t* occupancy;
+
   // Optional table of export function entry point names 1:1 with ptrs.
   // These names are only used for tracing/debugging and can be omitted to save
   // binary size.
@@ -38,6 +45,9 @@ typedef struct quidditch_executable_export_table_v0_t {
   // verbose logging. The string values, when present, may be attached to
   // tracing/debugging events related to the entry point.
   const char* const* tags;
+
+  // Optional string table of parameter names (v0.6; unused here).
+  const char* const* parameter_names;
 
   // Optional table of source locations 1:1 with ptrs.
   // These are the canonical source location in the compiler.
