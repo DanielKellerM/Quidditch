@@ -6,11 +6,26 @@
 #include "riscv_decls.h"
 #include "team_decls.h"
 
-int close(int fd) { return -1; }
+// newlib's stdio and malloc call the _-prefixed syscalls (_close/_read/_lseek/
+// _write/_fstat/_isatty/_sbrk). The runtime previously defined the POSIX names
+// without the underscore, so newlib's own defaults -- which `ecall` and trap on
+// bare-metal Snitch -- were linked instead. Provide the _-prefixed stubs.
+int _close(int fd) { return -1; }
 
-off_t lseek(int file, off_t offset, int whence) { return 0; }
+off_t _lseek(int file, off_t offset, int whence) { return 0; }
 
-ssize_t read(int fd, void *buf, size_t count) { return 0; }
+ssize_t _read(int fd, void *buf, size_t count) { return 0; }
+
+int _fstat(int fd, struct stat *st) {
+  st->st_mode = S_IFCHR;  // character device -> stdio leaves stdout unbuffered
+  return 0;
+}
+
+int _isatty(int fd) { return 1; }
+
+int _getpid(void) { return 1; }
+
+int _kill(int pid, int sig) { return -1; }
 
 extern uintptr_t volatile tohost, fromhost;
 
@@ -21,7 +36,7 @@ static struct Buffer {
   char verilatorReachable[120];
 } buffer[SNRT_CLUSTER_CORE_NUM];
 
-ssize_t write(int file, const void *ptr, size_t len) {
+ssize_t _write(int file, const void *ptr, size_t len) {
   uint32_t id = snrt_hartid();
   int old_len = len;
 
@@ -51,11 +66,18 @@ ssize_t write(int file, const void *ptr, size_t len) {
 extern uint8_t _edram;
 static uint8_t *heap = &_edram;
 
-void *sbrk(ptrdiff_t incr) {
+// newlib's malloc/calloc call _sbrk (leading underscore). Defining only `sbrk`
+// left newlib's default _sbrk linked, which does an `ecall` to grow the heap;
+// on bare-metal Snitch there is no machine-mode ecall handler, so it traps and
+// the exception restarts the program -- an infinite restart loop that prevents
+// any heap allocation. Provide _sbrk as the bump-pointer heap.
+void *_sbrk(ptrdiff_t incr) {
   uint8_t *result = heap;
   heap += incr;
   return result;
 }
+
+void *sbrk(ptrdiff_t incr) { return _sbrk(incr); }
 
 void _exit(int exitCode) {
   asm volatile("wfi");
