@@ -54,3 +54,9 @@ extern "C" void quidditch_export_snrt_dma_wait_all(void)
 extern "C" void quidditch_export_snrt_dma_wait_all(void) {
   snrt_dma_wait_all();
 }
+
+extern "C" void *quidditch_export_snrt_l1_next(void) asm("snrt_l1_next");
+extern "C" void *quidditch_export_snrt_l1_next(void) { return snrt_l1_next(); }
+
+extern "C" uint32_t quidditch_export_snrt_mcycle(void) asm("snrt_mcycle");
+extern "C" uint32_t quidditch_export_snrt_mcycle(void) { return snrt_mcycle(); }
