@@ -54,3 +54,7 @@ extern "C" void quidditch_export_snrt_dma_wait_all(void)
 extern "C" void quidditch_export_snrt_dma_wait_all(void) {
   snrt_dma_wait_all();
 }
+
+// Used by _write() (syscalls.c) to index the per-core output buffer.
+extern "C" uint32_t quidditch_export_snrt_hartid(void) asm("snrt_hartid");
+extern "C" uint32_t quidditch_export_snrt_hartid(void) { return snrt_hartid(); }
