@@ -6,4 +6,4 @@
 	url = https://github.com/DanielKellerM/snitch_cluster
 [submodule "xdsl"]
 	path = xdsl
-	url = https://github.com/xdslproject/xdsl
+	url = https://github.com/DanielKellerM/xdsl
