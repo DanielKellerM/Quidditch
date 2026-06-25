@@ -12,7 +12,7 @@ non-negotiable and enforced by the gate, not by you.
 
 ## Hardware model (the facts you reason with)
 
-- Cluster = **8 compute cores + 1 DM (data-mover) core**. The DM core has **no FPU**.
+- Cluster = **8 compute cores + 1 DM (data-mover) core** (the DM core is DMA-only by role; every core, it included, has an FPU, but **`fdiv`/`fsqrt` are illegal cluster-wide** — `Xdiv_sqrt=false`).
 - Compute cores stream FMAs via **FREP + SSR** at ~1 FMA/cycle/core steady; the
   measured RTL ceiling is ~0.87 FPU utilization. That is the roofline to chase.
 - The **iDMA** moves ~64 bytes/cycle (512-bit). `dual_buffer` overlaps the next

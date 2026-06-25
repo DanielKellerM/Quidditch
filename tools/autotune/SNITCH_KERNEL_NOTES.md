@@ -5,16 +5,26 @@ Source tree: `~/Projects/Quidditch/snitch_cluster/sw/`. All `file:line`
 references are relative to that tree unless an absolute path is given.
 
 **Hard fact that drives everything below:** in the canonical cluster (9 harts =
-8 compute + 1 DM) the **DM core is the LAST hart index** and has **NO FPU**.
-Compute cores `0..N-1` have FPUs (plus SSR + FREP). `SNRT_CLUSTER_DM_CORE_NUM`
+8 compute + 1 DM) the **DM core is the LAST hart index**. `SNRT_CLUSTER_DM_CORE_NUM`
 is `1` (`impl/snitch_cluster_cfg.h.tpl:46`), so the partition is exactly
 "`compute_core_num` compute harts + 1 trailing DM hart." Concrete corroboration:
 `wake_dm` raises `snrt_int_cluster_set(1 << snrt_cluster_compute_core_num())`
 (`src/dm.h:142`) — the wake-target bit is exactly `compute_core_num`, pinning the
-DM core to the last hart index. Any floating-point op (`fmul.d`, `fadd.d`,
-`fdiv.d`, `tanh`/`expf` via libm) executed on the DM core traps or falls through
-to a scalar/degenerate path. This is the root cause of the autotuner's
-integer-only Tier-1 reference (Part 2).
+DM core to the last hart index.
+
+**FPU correction (cfg-verified — supersedes an earlier "DM core has no FPU" claim;
+see `CFG_DRIVEN_TARGET.md`):** BOTH core classes carry `isa: rv32imafd`
+(`cfg/default.json:96,126`), so **every core — DM included — has a full FPU**
+(`IsaCfg[].RVF/RVD=1`, `snitch_cluster_pkg.sv.tpl:244-245`); `fmul.d`/`fadd.d`
+work on the DM core. What traps is **`fdiv.d`/`fsqrt.d`**, because the separate cfg
+key `Xdiv_sqrt` defaults **false** (`schema.json:515`) and is omitted from both
+templates, so the FPnew DIVSQRT unit is `DISABLED` on **every** core
+(`pkg.sv.tpl:193-207`) — div/sqrt FP is illegal **cluster-wide**, NOT a DM-core
+FPU disable. So an in-harness fp reference using only `fmul.d`/`fadd.d` would run
+fine on the DM core today; the integer-only Tier-1 reference (Part 2) is a
+*choice* (exact, and side-steps div + RTL-vs-host fp determinism), not a hardware
+necessity. The real fp constraint for any op is: **avoid `fdiv`/`fsqrt`** (use a
+reciprocal/Newton formulation), everywhere.
 
 ---
 
@@ -35,7 +45,7 @@ public forward declarations (what `harness.c.in` `#include`s) live in
 |----------|-----------|-----------|
 | `snrt_hartid` | `src/team.h:23-27` | Raw `mhartid` CSR; system-global, includes base-hartid offset. |
 | `snrt_cluster_core_num` | `src/team.h:43-45` | `SNRT_CLUSTER_CORE_NUM` = total cores/cluster **incl.** DM (e.g. 9). |
-| `snrt_cluster_dm_core_num` | `src/team.h:116-118` | `SNRT_CLUSTER_DM_CORE_NUM`, normally 1 — the FPU-less DMA hart(s). |
+| `snrt_cluster_dm_core_num` | `src/team.h:116-118` | `SNRT_CLUSTER_DM_CORE_NUM`, normally 1 — the DMA hart(s) (DMA-only by role; has an FPU like every core). |
 | `snrt_cluster_compute_core_num` | `src/team.h:125-127` | `core_num - dm_core_num` = number of FPU compute cores. The partition boundary index. |
 | `snrt_global_compute_core_num` | `src/team.h:70-72` | `cluster_num() * cluster_compute_core_num()`. Denominator for global work split that **excludes** DM cores. |
 | `snrt_global_core_idx` | `src/team.h:79-81` | Zero-based system-wide index over ALL cores (compute + DM): `hartid() - base_hartid`. |
@@ -147,6 +157,19 @@ if (snrt_is_dm_core()) {
 
 ### 2.1 THE KEY UNBLOCK: gate the reference to a compute core
 
+> **⚠ Premise SUPERSEDED (cfg-verified; see the FPU correction in the intro +
+> `CFG_DRIVEN_TARGET.md`).** This section assumed the DM core is FPU-less, so the
+> fp reference must be moved to a compute core via a post-`quit` rendezvous. That
+> is WRONG: the DM core HAS a full FPU (`rv32imafd`). An fp reference using only
+> `fmul.d`/`fadd.d` runs on the DM core **as-is** — **no compute-core rendezvous
+> needed**, which removes most of the complexity below. The real constraint is
+> narrower: `fdiv.d`/`fsqrt.d` are illegal **cluster-wide** (`Xdiv_sqrt=false`),
+> so the fp reference (and any kernel) must avoid div/sqrt (reciprocal/Newton).
+> The integer-only Tier-1 reference remains a fine *choice* (exact + div-free +
+> dodges RTL-vs-host fp determinism), not a necessity. The text below is kept for
+> the harness/worker-loop mechanics, but the "must run on a compute core" framing
+> no longer applies.
+
 **Current state** (`tools/autotune/harness.c.in:42-46`):
 
 ```c
@@ -163,19 +186,17 @@ Every non-DM hart returns into `quidditch_dispatch_enter_worker_loop()`
 dispatched kernel when the DM core releases the barrier and a workgroup is
 assigned. **All** code after the gate — input fill, dispatch, AND the Tier-1
 reference + compare (`harness.c.in:114-127`, `@@CHECK@@` at line 120) — runs
-**only on the DM core**, which has no FPU (`team.h:152`
-`snrt_is_dm_core = !snrt_is_compute_core`).
+**only on the DM core** (`team.h:152` `snrt_is_dm_core = !snrt_is_compute_core`).
+**[CORRECTED — see the intro FPU note + §2.1 banner]** the DM core HAS an FPU;
+`fmul.d`/`fadd.d` work there. Only `fdiv.d`/`fsqrt.d` trap, and that is
+**cluster-wide** (`Xdiv_sqrt=false`), not a DM-core property.
 
-That single gate is the **sole reason** the reference is integer-only:
-`gen_harness.py:82-138` emits a structured-integer reference
-(`A[i,k]=i*K+k+1`, `B value=k*N+j+1`) and an in-harness CHECK that recomputes
-`want` with `(int)A*(int)B` accumulated in an `int`, comparing `(int)C` — pure
-`int mul/add` + an implicit `fcvt.w.d` on the read of the f64 buffer
-(`gen_harness.py:128-138`). It `assert`s no int32 overflow and rejects the shape
-otherwise (`gen_harness.py:96-99`). `fdiv.d`/`fmul.d`/`fadd.d` would trap on the
-DM core. KERNELS.md spells out the invariant: *"DM core (hart_00008) has no FPU
-— the in-harness Tier-1 reference stays integer (`fcvt.w.d` + int mul/add). All
-floating-point checking is host-side (Tier-2)."*
+So the reference is integer/f64-exact by CHOICE, NOT a hardware necessity:
+`gen_harness.py` emits a structured-integer reference (`A[i,k]=i*K+k+1`,
+`B value=k*N+j+1`) compared in `int` while it fits int32, and an f64-EXACT
+reference + `==` above that (both div-free, so legal anywhere). int32 is exact +
+side-steps RTL-vs-host fp determinism; it rejects only the >2^53 / true-fp case
+(`gen_harness.py:96-99`), which needs the host fp-tolerance Tier-2.
 
 **The lever:** the FPU lives on the compute harts (`snrt_is_compute_core()`,
 `team.h:134`). Re-gating the reference compute onto a compute core would make an

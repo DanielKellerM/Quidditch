@@ -1,0 +1,25 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Large-K matmul C[4,4] = A[4,1024] @ B[4,1024]^T, f64. Small M,N keep the
+# in-harness O(M*N*K) scalar reference cheap enough to sim; K=1024 overflows the
+# int32 reference (~7.9e9 > 2^31) but stays f64-EXACT (< 2^53), so it exercises
+# the f64-exact reference path (gen_harness) -- the shape the int32 gate rejects.
+name        = "gemm_bigk"
+mlir        = "tools/autotune/ops/gemm_bigk.mlir"
+entry       = "gemm_bigk"               # quidditch_gemm_bigk_dispatch_0_library_query
+module      = "gemm_bigk_mod"           # #include <gemm_bigk_mod.h>
+op          = "matmul_transpose_b"      # C[i,j] = sum_k A[i,k] * B[j,k]
+dtype       = "f64"
+transpose_b = true
+shape       = { M = 4, N = 4, K = 1024 }
+bindings    = ["A", "B", "C"]
+
+[knobs]
+l1_tiles             = { type = "triple", choices = [2, 4] }
+dual_buffer          = { type = "bool" }
+l1_tiles_interchange = { type = "perm", choices = [[2, 0, 1]] }
+
+[validation]
+baseline_tag = "4x4x4_dbtrue"

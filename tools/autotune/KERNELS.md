@@ -10,7 +10,7 @@ is what the whole-model profiler answers (sim → per-dispatch cycles → rank).
 This list is the menu; the profile picks the order for a given model.
 
 See `SNITCH_KERNEL_NOTES.md` for the Snitch runtime/kernel reference: the
-core-gating API (how to keep work off the FPU-less DM core), the SSR/FREP +
+core-gating API (how to keep compute off the DMA-only DM core), the SSR/FREP +
 double-buffer kernel idioms, the per-op reference-kernel mapping, and the
 compute-core fp-reference unblock (gating the Tier-1 reference to a compute core
 to admit nonlinear/large-K ops — sound, but needs a post-dispatch rendezvous).
@@ -107,7 +107,9 @@ fused dispatch and (b) a multi-op host reference for the Tier-1/Tier-2 gates.
 - A new op **rejects cleanly** at `load_spec`/`gen_harness` until its reference
   gate exists — never emit a harness that can't prove correctness (no vacuous
   gate; this is why elementwise/f32 raise today rather than mis-build).
-- DM core (hart_00008) has **no FPU** — the in-harness Tier-1 reference stays
-  integer (`fcvt.w.d` + int mul/add). All floating-point checking is host-side
-  (Tier-2). This is why nonlinear/large-K ops need the fp-tolerance Tier-2, not
-  a richer in-harness reference.
+- **No `fdiv`/`fsqrt` anywhere** — they are illegal **cluster-wide**
+  (`Xdiv_sqrt=false`; every core, incl. the DM core, otherwise has a full FPU —
+  `fmul.d`/`fadd.d` work). The in-harness reference is integer/f64-exact (both
+  div-free) by CHOICE (exact + dodges RTL-vs-host fp determinism), not because
+  the DM core lacks an FPU. Nonlinear ops (needing division, or true-fp
+  tolerance) are what require the host-side fp-tolerance Tier-2.

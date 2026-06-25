@@ -107,7 +107,7 @@ def load_spec(name):
         _reject(nm, f"shape must give {', '.join(dim_names)}")
     if 1 in dims:
         _reject(nm, "degenerate dim =1 (matvec / zero-tile regime) unsupported in v1")
-    shape = tuple(dims) + (None,) * (3 - ndims)   # pad to (M, N, K); K=None for 2D ops
+    shape = tuple(dims) + (None,) * (3 - ndims)   # pad to (M,N,K); N=K=None for 1-D elementwise
 
     knobs = d.get("knobs", {})
     tile_choices = knobs.get("l1_tiles", {}).get("choices", [])

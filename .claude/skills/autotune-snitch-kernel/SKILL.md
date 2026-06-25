@@ -94,7 +94,7 @@ python3 tools/autotune/agent/agent_loop.py --op <name> --propose "16,16,16,true"
 python3 tools/autotune/agent/author_pass.py --op <name> --pass-file <authored_pass.py>
 python3 tools/autotune/agent/agent_loop.py --op <name> --status
 ```
-Read `agent/program.md` first — it has the hardware model (8 compute + 1 no-FPU DM
+Read `agent/program.md` first — it has the hardware model (8 compute + 1 DMA-only DM
 core, FREP/SSR ~0.87 ceiling, iDMA, dual_buffer), the Amdahl-ordered tiers, and
 the keep/revert rules. Each proposal goes through the cost-model pre-rank + RTL
 sim + Tier-1/Tier-2; a faster-but-wrong proposal is reverted, never kept.

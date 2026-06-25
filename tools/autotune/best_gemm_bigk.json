@@ -1,12 +1,12 @@
 {
-  "tag": "16x16x16_dbfalse",
+  "tag": "4x2x4_dbtrue",
   "config": [
     [
-      16,
-      16,
-      16
+      4,
+      2,
+      4
     ],
-    "false",
+    "true",
     [
       2,
       0,
@@ -15,7 +15,7 @@
   ],
   "legal": true,
   "ok": true,
-  "cycles": 1436,
+  "cycles": 91511,
   "errors": 0,
-  "kernel": "gemm_square"
+  "kernel": "gemm_bigk"
 }

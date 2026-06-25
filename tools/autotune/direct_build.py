@@ -112,7 +112,7 @@ const iree_hal_executable_library_header_t** {query}(
 
 
 def _inject(mlir_text, l1_tiles, dual_buffer, interchange=None):
-    # N-dimensional: 3 tiles for matmul (M,N,K), 2 for a 2D elementwise op.
+    # N-dimensional: 3 tiles for matmul (M,N,K), 1 for a 1-D elementwise op.
     tiles = ", ".join(str(t) for t in l1_tiles)
     s = re.sub(r"l1_tiles = \[[0-9, ]+\]", f"l1_tiles = [{tiles}]", mlir_text)
     s = re.sub(r"dual_buffer = (?:true|false)", f"dual_buffer = {dual_buffer}", s)
@@ -149,7 +149,7 @@ def build(config, outdir, mlir_template=None, module="gemm_mod", harness_obj=Non
     """Build a harness ELF for `config` into an isolated temp dir.
 
     config        = {"l1_tiles": [...], "dual_buffer": "true"|"false", "interchange": [...]}
-                    l1_tiles/interchange are N-dim: 3 for matmul (M,N,K), 2 for a 2D op.
+                    l1_tiles/interchange are N-dim: 3 for matmul (M,N,K), 1 for a 1-D op.
     outdir        = directory the final ELF is copied to (created if needed).
     mlir_template = kernel .mlir to inject into (defaults to gemm_square).
     module        = iree quidditch_module DST name (the static lib + header stem).

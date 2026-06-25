@@ -77,6 +77,8 @@ def check(op, config, xdsl_passes=None):
     if err:
         sys.exit(f"harness compile failed:\n{err}")
     ix = list(config[4]) if len(config) > 4 else [2, 0, 1]
+    # tier2 is matmul-only (3D); build the nested (tiles, db, ix) repr sweep.tag_of expects.
+    tag = sweep.tag_of((tuple(config[:3]), config[3], tuple(ix)), spec)
     d = tempfile.mkdtemp(dir=sweep.WORK, prefix="t2_")
     elf, err = direct_build.build(
         {"l1_tiles": list(config[:3]), "dual_buffer": config[3], "interchange": ix},
@@ -85,7 +87,7 @@ def check(op, config, xdsl_passes=None):
     if err:
         sys.exit(f"build failed:\n{err}")
     M, N, _ = spec.shape
-    m = OUTHASH_RE.search(_sim_stdout(sweep.tag_of(config), elf))
+    m = OUTHASH_RE.search(_sim_stdout(tag, elf))
     if not m:
         sys.exit("Tier-2 FAIL: harness emitted no [OUTHASH] line")
     got_count, got_hash = int(m.group(1)), int(m.group(2), 16)

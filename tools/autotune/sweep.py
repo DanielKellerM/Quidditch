@@ -67,7 +67,7 @@ def tag_of(c, spec):
 
 def enumerate_grid(spec):
     # config = (tiles, dual_buffer, interchange); tiles/ix have spec.ndims entries
-    # (3 for matmul M,N,K; 2 for a 2D elementwise op).
+    # (3 for matmul M,N,K; 1 for a 1-D elementwise op).
     return [(tiles, db, tuple(ix))
             for tiles in itertools.product(spec.tile_choices, repeat=spec.ndims)
             for db in spec.dual_buffer
