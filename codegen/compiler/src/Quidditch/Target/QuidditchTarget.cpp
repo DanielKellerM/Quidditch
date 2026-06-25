@@ -111,19 +111,19 @@ static bool cfgHeaderDefined(StringRef text, StringRef name) {
 // into the target attr, but their consumers are TODO (future work, not forgotten).
 // Coverage table + cfg keys: CFG_DRIVEN_TARGET.md.
 struct ClusterParams {
-  unsigned computeCores = 8;   // CONSUMED (tiling divisor).
+  unsigned computeCores = 8;   // CONSUMED: tiling divisor (TensorTile/LowerForall).
   int64_t tcdmBytes = 0;       // SNRT_TCDM_SIZE (0 = absent).
                                // TODO(cfg-target): -> l1MemoryBytes, BLOCKED on the
-                               //   100000-vs-112640 DMA-stack overflow (do NOT use
-                               //   the full cfg TCDM).
+                               //   100000-vs-112640 DMA-stack overflow.
   int64_t seqLoops = 0;        // SNRT_NUM_SEQUENCER_LOOPS.
-                               // TODO(cfg-target): enforce in the FREP body-size/
-                               //   nesting check (convert_riscv_scf_for_to_frep).
-  int64_t seqInsns = 0;        // SNRT_NUM_SEQUENCER_INSNS (paired with seqLoops TODO).
-  bool supportsSSR = true;     // SNRT_SUPPORTS_SSR.
-                               // TODO(cfg-target): gate the xDSL SSR pass selection.
-  bool supportsFREP = true;    // SNRT_SUPPORTS_FREP.
-                               // TODO(cfg-target): gate the xDSL FREP pass selection.
+                               // TODO(cfg-target): FREP nesting bound -- no consumer
+                               //   yet (>2 nesting is unreachable in the lowering).
+  int64_t seqInsns = 0;        // SNRT_NUM_SEQUENCER_INSNS.
+                               // CONSUMED: bounds the xDSL FREP body size.
+  bool supportsSSR = true;     // SNRT_SUPPORTS_SSR. CONSUMED (xDSL SSR pass gate).
+  bool supportsFREP = true;    // SNRT_SUPPORTS_FREP. CONSUMED (xDSL FREP pass gate).
+  bool supportsDivSqrt = true; // SNRT_SUPPORTS_DIVSQRT (Xdiv_sqrt). CONSUMED:
+                               //   refuse arith.divf when absent (xDSL).
 };
 
 static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
@@ -147,6 +147,7 @@ static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
     p.seqInsns = *i;
   p.supportsSSR = cfgHeaderDefined(text, "SNRT_SUPPORTS_SSR");
   p.supportsFREP = cfgHeaderDefined(text, "SNRT_SUPPORTS_FREP");
+  p.supportsDivSqrt = cfgHeaderDefined(text, "SNRT_SUPPORTS_DIVSQRT");
   return p;
 }
 
@@ -282,6 +283,16 @@ public:
     ClusterParams cp = clusterParamsFromCfgHeader(targetOptions.clusterCfgHeader);
     IntegerType i32 = IntegerType::get(context, 32);
     list.append("compute_cores", IntegerAttr::get(i32, cp.computeCores));
+    // CONSUMED in buildTranslationPassPipeline (supports_ssr/frep gate the xDSL
+    // SSR/FREP passes; sequencer_insns bounds the FREP body size). Emitted only with
+    // the cfg flag; absent (no flag) reads as supported / the xDSL default.
+    if (!targetOptions.clusterCfgHeader.empty()) {
+      list.append("supports_ssr", BoolAttr::get(context, cp.supportsSSR));
+      list.append("supports_frep", BoolAttr::get(context, cp.supportsFREP));
+      list.append("supports_div_sqrt", BoolAttr::get(context, cp.supportsDivSqrt));
+      if (cp.seqInsns)
+        list.append("sequencer_insns", IntegerAttr::get(i32, cp.seqInsns));
+    }
     executableTargetAttrs.push_back(IREE::HAL::ExecutableTargetAttr::get(
         context, StringAttr::get(context, "quidditch"),
         StringAttr::get(context, "snitch"), list.getDictionary(context)));
@@ -392,9 +403,49 @@ public:
         .addPass(quidditch::SnitchDMA::createLegalizeDMAOperationsPass)
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
+    // Gate the xDSL SSR/FREP passes on the cfg-derived capability attrs. Only
+    // rewrite when the target lacks one, so the default cfg (both supported, or the
+    // attrs absent = supported) leaves the pipeline string byte-identical. Consumes
+    // supports_ssr / supports_frep (emitted by getDefaultExecutableTargets only with
+    // the cfg flag).
+    std::string xDSLPasses = targetOptions.xDSLPasses;
+    {
+      DictionaryAttr cfg = targetAttr.getConfiguration();
+      auto supported = [&](StringRef key) {
+        BoolAttr b = cfg ? cfg.getAs<BoolAttr>(key) : BoolAttr();
+        return !b || b.getValue(); // absent -> supported (default)
+      };
+      SmallVector<std::string> opts;
+      if (!supported("supports_ssr"))
+        opts.push_back("ssr=false");
+      if (!supported("supports_frep"))
+        opts.push_back("frep=false");
+      if (!supported("supports_div_sqrt"))
+        opts.push_back("div_sqrt=false");
+      // FREP body-size bound; override the xDSL default (32, the canonical sequencer
+      // depth) only for a non-default cfg, so the default leaves the string untouched.
+      if (IntegerAttr si =
+              cfg ? cfg.getAs<IntegerAttr>("sequencer_insns") : IntegerAttr())
+        if (si.getInt() != 32)
+          opts.push_back("sequencer_insns=" + std::to_string(si.getInt()));
+      if (!opts.empty()) {
+        std::string braces = "{";
+        for (size_t i = 0; i < opts.size(); ++i) {
+          if (i)
+            braces += " ";
+          braces += opts[i];
+        }
+        braces += "}";
+        std::string tok = "test-lower-linalg-to-snitch";
+        std::string::size_type pos = xDSLPasses.find(tok);
+        if (pos != std::string::npos)
+          xDSLPasses.insert(pos + tok.size(), braces);
+        // A custom --iree-quidditch-xdsl-passes without the aggregate owns its own
+        // pass selection; the gate cannot apply and is a no-op there by design.
+      }
+    }
     modulePassManager.addPass(quidditch::createConvertToRISCVPass(
-        {targetOptions.xDSLOptPath, targetOptions.assertCompiled,
-         targetOptions.xDSLPasses}));
+        {targetOptions.xDSLOptPath, targetOptions.assertCompiled, xDSLPasses}));
 
     FunctionLikeNest(modulePassManager)
         .addPass(IREE::LinalgExt::createLinalgExtToLoopsPass)
