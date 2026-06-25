@@ -2,17 +2,54 @@
 
 *Design note — iDMA/Quidditch autotuner team. Scope: the **default** cfg (`snitch_cluster/cfg/default.json`) as the worked example, not a general multi-cfg generator.*
 
-> **STATUS UPDATE (post-design).** Two slices below are now IMPLEMENTED, so parts
-> of "The problem" / "Smallest first step" read as already-addressed:
-> - **cost_model** `NCORE` + `DMA_BPC` are cfg-derived (commits `c920543`, `a0366d4`).
-> - **compiler `compute_cores`** is cfg-derived via `--iree-quidditch-cluster-cfg-header`
->   (commit `3a88d02`; `QuidditchTarget.cpp` — the TODO at the old `:165` and the attr
->   at `~:215` are DONE for this param). The "baked literal 8 / load-bearing gap"
->   framing below describes the PRE-`3a88d02` state.
-> Still open (the design's remaining body): wiring the flag into the build so it is
-> passed automatically, and extending the header-read to TCDM / ISA-FPU-SSR-FREP.
-> The "Verified against source 2026-06-23" line numbers predate `3a88d02` and have
-> drifted; treat them as approximate.
+> **STATUS UPDATE — read the Coverage table below as the source of truth; the
+> prose after it is the original PRE-implementation design and is now partly
+> historical.** Implemented since the design:
+> - **cost_model** `NCORE` + `DMA_BPC` are cfg-derived (`c920543`, `a0366d4`).
+> - **compiler**: ALL the cfg HW params are now READ from the header into a
+>   `ClusterParams` struct and THREADED into the `ExecutableTargetAttr` config dict
+>   (`3a88d02` compute_cores, `664a6ee` the rest) — `compute_cores` is CONSUMED; the
+>   rest (`tcdm_bytes`, `sequencer_loops/insns`, `supports_ssr/frep`) are threaded
+>   PLACEHOLDERS whose consumers are `TODO(cfg-target)` (grep that tag in
+>   `QuidditchTarget.cpp`). So the body's "baked literal 8 / no symbol read back /
+>   nothing threaded" framing is the PRE-`3a88d02`/`664a6ee` state — NOT current.
+> Still open: wiring the flag into the build so it is passed automatically, and
+> wiring each placeholder's CONSUMER (the `TODO(cfg-target)` sites).
+> **Line-number cites below have drifted** (`664a6ee` added the ~35-line struct):
+> `compute_cores` attr is now `~:247` (not `:170`), `l1MemoryBytes` `~:150` (not
+> `:87`), the attr block `~:233-258`. Treat all body cites as approximate.
+
+## Coverage: cfg params the codegen target derives (and the TODO placeholders)
+
+We deliberately did NOT wire every cfg variable yet — only the load-bearing
+`compute_cores` (default cfg, as scoped). The rest are **flagged future work**, not
+forgotten (mirrored by a `TODO(cfg-target)` block at `QuidditchTarget.cpp`'s
+`compute_cores` site):
+
+| cfg param | cfg key → symbol | status | where it must land |
+|---|---|---|---|
+| compute cores | `nr_cores − dm_core_num` → `CFG_CLUSTER_NR_CORES`/`SNRT_CLUSTER_DM_CORE_NUM` | **DONE** | compiler `compute_cores` attr (`3a88d02`) + cost_model `NCORE` |
+| DMA bytes/cycle | `dma_data_width` (512) | **PARTIAL** | cost_model `DMA_BPC` done; compiler not (not emitted to the header — needs the 1-line tpl add in the snitch_cluster submodule) |
+| TCDM size | `tcdm.size` (128 kB) → `SNRT_TCDM_SIZE` | **TODO** | compiler `l1MemoryBytes` — blocked on the `100000`-vs-`112640` DMA-stack-overflow workaround; fix that first |
+| TCDM banks / width | `tcdm.banks` (32), `data_width` (64) → `SNRT_TCDM_BANK_{NUM,WIDTH}` | **TODO** | bank-partition / conflict-avoidance knob (not yet a knob) |
+| ISA + FPU | `isa` (rv32imafd), `Xdiv_sqrt` (false) | **TODO** | codegen must refuse `fdiv`/`fsqrt` (today implicit) + gate FP by isa |
+| SSR / FREP present | `xssr`/`xfrep` → `SNRT_SUPPORTS_{SSR,FREP}` | **TODO** | select the xDSL SSR/FREP pass pipeline (today a fixed `xDSLPasses` string) |
+| sequencer bounds | `num_sequencer_{loops,insns}` (2/32) → `SNRT_NUM_SEQUENCER_*` | **TODO** | enforce the FREP body-size/nesting limit (today unchecked — see the audit) |
+| FPU pipeline depth | `timing.lat_comp_fp64` (3) | **TODO** | xDSL `memref_stream_interleave` `pipeline_depth` (today a literal 4) |
+
+Plus: **wire the `--iree-quidditch-cluster-cfg-header` flag into the build** so it
+is passed automatically, and the reuse-the-header path for the params above.
+⚠️ **Measured (A/B, `gemm_square` @ 16,16,16, 2026-06-23):** passing the flag on the
+default cfg is a **code no-op** (`.text` disassembly byte-identical → cycles
+identical) but **NOT a binary no-op**. IREE pretty-prints the full target attr into a
+`"HAL device __device_0 not found"` diagnostic cstring, and the `664a6ee` placeholders
+(`sequencer_*`, `supports_*`, `tcdm_bytes`) grow that `.rodata` string ~70 chars
+(a `$d`/`.L0` marker shifts `0x120`→`0x122`). It survives stripping, so wiring the
+flag **breaks the stripped-ELF canary** (`direct_build.py:169`) for **zero functional
+gain on the default cfg** (`compute_cores` is `8` either way: `9−1` = the fallback).
+So wiring is gated on a decision: either rebaseline the canary, or defer until a
+placeholder CONSUMER lands / a non-default cfg is actually run (where
+`compute_cores ≠ 8` is the first thing that genuinely changes codegen).
 
 ## The problem
 

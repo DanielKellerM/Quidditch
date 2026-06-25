@@ -85,6 +85,11 @@ function(quidditch_module)
     if (_RULE_ASSERT_XDSL)
       list(APPEND _COMPILER_ARGS "--iree-quidditch-assert-compiled=true")
     endif ()
+    # Derive the codegen HW params from the same cfg the runtime is built from.
+    if (QUIDDITCH_CLUSTER_CFG_HEADER)
+      list(APPEND _COMPILER_ARGS "--iree-quidditch-cluster-cfg-header=${QUIDDITCH_CLUSTER_CFG_HEADER}")
+      list(APPEND _EXTRA_DEPENDS "${QUIDDITCH_CLUSTER_CFG_HEADER}")
+    endif ()
 
     list(APPEND _EXTRA_DEPENDS "${XDSL_OPT_PATH}")
     list(APPEND _EXTRA_DEPENDS "${QUIDDITCH_TOOLCHAIN_ROOT}/bin/pulp-as")

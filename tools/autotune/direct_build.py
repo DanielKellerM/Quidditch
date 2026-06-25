@@ -38,6 +38,19 @@ LLVM_AR = f"{LLVM}/llvm-ar"
 LLVM_RANLIB = f"{LLVM}/llvm-ranlib"
 LD_LLD = f"{LLVM}/ld.lld"
 
+# cfg-generated cluster header for --iree-quidditch-cluster-cfg-header (the target's
+# compute_cores = CFG_CLUSTER_NR_CORES - SNRT_CLUSTER_DM_CORE_NUM). Prefer the
+# build-tree copy that ninja's quidditch_module feeds iree-compile so the canary's
+# direct vs ninja invocations pass an identical header; fall back to the committed
+# copy. Resolved per build() call (not at import) since ninja may generate it later.
+_GEN_CFG_HEADER = f"{BUILD}/snitch_cluster/cluster_gen/snitch_cluster_cfg.h"
+_SRC_CFG_HEADER = f"{ROOT}/snitch_cluster/sw/runtime/impl/snitch_cluster_cfg.h"
+
+
+def _cluster_cfg_header():
+    return _GEN_CFG_HEADER if os.path.exists(_GEN_CFG_HEADER) else _SRC_CFG_HEADER
+
+
 # --- constant prebuilt inputs (reused, never regenerated) ---
 HARNESS_O = f"{BUILD}/samples/gemm_square/CMakeFiles/gemm_harness.dir/harness.c.obj"
 CONST_ARCHIVES = [
@@ -194,6 +207,7 @@ def build(config, outdir, mlir_template=None, module="gemm_mod", harness_obj=Non
          f"--iree-quidditch-xdsl-opt-path={XDSL_OPT}",
          f"--iree-quidditch-toolchain-root={TOOLCHAIN_ROOT}",
          "--iree-quidditch-assert-compiled=true",
+         f"--iree-quidditch-cluster-cfg-header={_cluster_cfg_header()}",
          *([f"--iree-quidditch-xdsl-passes={xdsl_passes}"] if xdsl_passes else []),
          "--output-format=vm-c",
          "--iree-vm-target-index-bits=32",
