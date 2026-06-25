@@ -27,7 +27,15 @@ def PadToTilingConfigPass : Pass<"quidditch-pad-to-tiling-config">;
 
 def ConfigureForSnitchPass
   : InterfacePass<"quidditch-configure-for-snitch",
-      "mlir::FunctionOpInterface">;
+      "mlir::FunctionOpInterface"> {
+  let options = [
+    Option<"configTable", "config-table", "std::string", /*default=*/[{""}],
+           "Path to a JSON file mapping a dispatch symbol name to its tiling "
+           "{workgroup_tiles, l1_tiles, l1_tiles_interchange, dual_buffer}. Empty "
+           "uses the built-in seed table. The autotuner upserts rows here so "
+           "per-dispatch tilings are data-driven (no compiler rebuild per tune).">,
+  ];
+}
 
 def TensorTilePass : InterfacePass<"quidditch-tensor-tile",
   "mlir::FunctionOpInterface"> {

@@ -80,6 +80,7 @@ struct QuidditchTargetOptions {
   std::string staticLibraryOutputPath;
   std::string xDSLOptPath;
   std::string xDSLPasses = "arith-add-fastmath,test-lower-linalg-to-snitch";
+  std::string configTable;
   std::string toolChainRoot;
   bool assertCompiled = false;
   // TODO: This should actually be 112640 but DMA stack overflows. Ooopsie!
@@ -110,6 +111,12 @@ struct QuidditchTargetOptions {
                             llvm::cl::desc("The xdsl-opt pass pipeline (-p) used "
                                            "to lower each kernel; the autotuner "
                                            "sweeps Group-B pass knobs via this."));
+    binder.opt<std::string>("iree-quidditch-config-table", configTable,
+                            llvm::cl::cat(category),
+                            llvm::cl::desc("Path to a JSON per-dispatch tiling "
+                                           "table for ConfigureForSnitch; empty "
+                                           "uses the built-in seed. The autotuner "
+                                           "upserts tuned tilings here."));
     binder.opt<std::string>(
         "iree-quidditch-toolchain-root", toolChainRoot, llvm::cl::cat(category),
         llvm::cl::desc("Path to the root directory of the Quidditch toolchain "
@@ -179,7 +186,11 @@ public:
     }
     modulePassManager.addPass(createMaterializeUserConfigsPass());
     FunctionLikeNest funcPassManager(modulePassManager);
-    funcPassManager.addPass(quidditch::createConfigureForSnitchPass);
+    funcPassManager.addPass([this] {
+      quidditch::ConfigureForSnitchPassOptions opts;
+      opts.configTable = targetOptions.configTable;
+      return quidditch::createConfigureForSnitchPass(opts);
+    });
   }
 
   void buildTranslationPassPipeline(IREE::HAL::ExecutableTargetAttr targetAttr,
