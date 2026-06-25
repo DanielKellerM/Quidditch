@@ -23,7 +23,7 @@ to admit nonlinear/large-K ops — sound, but needs a post-dispatch rendezvous).
 | Op | Shows up in | Reference gate | Status | Blocker / change needed |
 |----|-------------|----------------|--------|-------------------------|
 | matmul / matmul_transpose_b | FC layers, GRU/LSTM gate projections | int-exact (Tier-1) | ✅ | none |
-| elementwise add/mul/sub | residuals, gate combines, bias | int-exact (Tier-1) | 🧩 | `gen_harness` `_gen_elementwise` + 2D (M,N) shape in `spec` |
+| elementwise add/mul/sub | residuals, gate combines, bias | int-exact (Tier-1) | ✅ | `ops/ewadd` (1-D, 256); tunable (see order §1) — model as 1-D since IREE collapses N-D before tiling |
 | relu / max | activations | int-exact (Tier-1) | 🧩 | as elementwise; piecewise-linear stays integer-exact |
 | sigmoid / tanh | GRU/LSTM gates | **fp-tolerance (Tier-2)** | 🧩 | the fp-tolerance Tier-2 keystone (host rel+abs tol by dtype) |
 | matvec (M=1 GEMV) | every RNN/GRU timestep | fp-tolerance (Tier-2) | 🧩 | M=1 currently rejected; int32 ref overflows large K → must go through the fp gate, not the int gate |
@@ -33,9 +33,54 @@ to admit nonlinear/large-K ops — sound, but needs a post-dispatch rendezvous).
 | layernorm / softmax | transformers | fp-tolerance (Tier-2) | 🔨 | reduction + broadcast fusion; later |
 | conv1d / conv2d | CNN front-ends | int-exact / fp | 🔨 | im2col vs direct; later |
 
+## Harness scope: compute-bound tunes in-harness, memory-bound is bandwidth-bound
+The harness A/B/C operand arrays are file-scope `static` `.bss` buffers, and
+`base.ld` maps `.bss` (and every section) to `>L3` (2 GB at 0x80000000,
+`memory.ld:7`), so they are **L3-resident, not TCDM-resident** — there is no
+link-time TCDM cap on them. The generated IREE/xDSL dispatch allocates its real
+TCDM working set at runtime and DMAs operand tiles L3→TCDM, computes, DMAs
+results back (the harness just hands it the L3 pointers; `axpy.h` is the
+reference idiom, not the executed code). So harness buffer size is independent of
+TCDM capacity; the only real size gate is the int32 host-reference overflow guard
+(`gen_harness.py:172-173`). Consequence:
+- **Compute-bound ops** (matmul family) show a real tiling spread at the in-TCDM
+  size (gemm 2×) — reuse + L1-staging make the small size representative.
+  **Harness-tune these.**
+- **Memory-bound ops** (pure-streaming elementwise, no reuse) are
+  **bandwidth-bound**, not build-capped. Total DMA volume is a fixed 3N (read A,
+  read B, write C) regardless of `l1_tiles`, so tiling cannot lower bytes moved or
+  move the floor. Measured (ewadd, M=256, the committed sweep): the optimum is
+  "don't tile" — at tile=256 a single tile makes `dual_buffer` moot
+  (`256_dbtrue == 256_dbfalse == 767`); the 767→1423 (1.86×) spread is ENTIRELY
+  small-tile overhead across {64,128,256}, where `dual_buffer` only recovers part
+  of the overhead it introduces (tile=64: 1132 vs 1423) — NOT a tiling/bandwidth
+  win. A throwaway run measured 1024→1201, 4096→2977, flat across tiles
+  (consistent with the bandwidth story; not committed as a results file). The
+  harness proves *correctness* for these ops, not a perf win — no in-harness
+  tiling will produce one, because the volume is fixed.
+- **The actual lever for memory-bound ops is FUSION**: keep a matmul/conv
+  producer's output in TCDM and consume it by the elementwise/activation op in
+  the same dispatch, killing the L3 round-trip. Fusion is an upstream IREE Flow
+  dispatch-formation decision (above the Quidditch plugin), so it is a
+  whole-model-compile concern, not a standalone-harness one — and whether Flow
+  forms that fused dispatch for these ops today is **still to be CONFIRMED**, not
+  assumed. Compute-bearing activations (expf/tanh) are the in-between case:
+  `dual_buffer` overlap is a real win there, but the op must first reach a
+  configured root (`ConfigureForSnitch` configures `matmul_transpose_b` only
+  today) and be measured under the Tier-2 fp gate. See `MEMORY_BOUND_GAP.md`.
+
 ## Widening order (dependency-sequenced)
-1. **elementwise (add/mul)** — int-exact, smallest change; proves the non-matmul
-   harness path. Candidates already present: `runtime/samples/vec_multiply`.
+1. **elementwise (add/mul)** — DONE and TUNABLE (`ops/ewadd`, `autotuner-design`).
+   Modeled as a **1-D** op (256 flattened elements, `l1_tiles` length 1): IREE
+   collapses an N-D elementwise to one parallel loop *before* `TensorTile`, so a
+   2-D `[Mt,Nt]` config is dimensionally mismatched post-collapse and silently
+   dropped (that was the earlier "inert knob" — a spec-model bug, not a codegen
+   gap). With the 1-D model the knob is live: sweep spread **767 (untiled, best)
+   → 1423** (1.86×), and `dual_buffer=true` beats false at every tile (it overlaps
+   the DMA waves). Optimum is "don't tile" here — 256 elements fit TCDM, so tiling
+   is pure overhead. Tier-1 gate is live (an external `mulf`-vs-`addf`-reference
+   mutation → all-elements error; in the normal sweep reference and kernel are
+   co-derived and in sync, so it catches real kernel miscompiles).
 2. **relu/max** — same int-exact path; first "activation".
 3. **fp-tolerance Tier-2 (keystone)** — harness dumps raw output, host computes
    rel+abs tol by dtype/K. Unblocks *everything* nonlinear and the int32-overflow

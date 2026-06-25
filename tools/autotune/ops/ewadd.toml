@@ -1,0 +1,26 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# First non-matmul autotuner kernel: 1D elementwise add C[256] = A + B, f64.
+# Proves the op-spec / generated-harness / direct-build path tunes a 1D op
+# (l1_tiles length 1, interchange [0]); direct_build compiles its harness.o (no
+# CMake target). 1-D because IREE collapses N-D elementwise before TensorTile;
+# a 2-D config is dropped post-collapse. Reference: SNITCH_KERNEL_NOTES.md axpy.
+name        = "ewadd"
+mlir        = "tools/autotune/ops/ewadd.mlir"
+entry       = "ewadd"                   # quidditch_ewadd_dispatch_0_library_query
+module      = "ewadd_mod"               # #include <ewadd_mod.h>
+op          = "elementwise"             # C[L] = A[L] + B[L]
+dtype       = "f64"
+transpose_b = false
+shape       = { M = 256 }               # flattened element count (1-D)
+bindings    = ["A", "B", "C"]
+
+[knobs]
+l1_tiles             = { type = "single", choices = [64, 128, 256] }
+dual_buffer          = { type = "bool" }
+l1_tiles_interchange = { type = "perm", choices = [[0]] }
+
+[validation]
+baseline_tag = "256_dbtrue"

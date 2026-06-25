@@ -7,7 +7,8 @@ description: >-
   deterministic cost-model-ranked grid sweep, and an LLM-agent-driven search
   (propose -> evaluate -> keep/revert) -- plus multi-kernel Amdahl orchestration,
   all behind sound correctness gates. Use when optimizing a single-dispatch f64
-  matmul / matmul_transpose_b .mlir kernel or improving its xDSL lowering.
+  matmul / matmul_transpose_b / elementwise .mlir kernel or improving its xDSL
+  lowering.
 ---
 
 # Autotune / optimize a Snitch/Quidditch kernel
@@ -26,11 +27,25 @@ independent off-toolchain host cross-check). You can drive it two ways:
 
 ## Scope (v1)
 
-A **single-dispatch, static-shape, f64 `matmul` / `matmul_transpose_b`** kernel
-(one `linalg` op). Tile choices must divide M,N,K. Rejected loudly (do not work
-around): multi-dispatch, dynamic shape, M/N/K = 1 (matvec), non-f64, elementwise.
-Note: Tier-2 is an EXACT cross-check; an fp-*tolerance* gate for f32/f16 is not
-built, so non-f64 stays out of scope.
+A **single-dispatch, static-shape, f64** kernel (one `linalg` op):
+- `matmul` / `matmul_transpose_b` — 3-D, tiled over M,N,K.
+- `elementwise` — modeled **1-D**: IREE collapses an N-D elementwise to one
+  parallel loop *before* tiling, so the spec's shape is the flattened element
+  count and `l1_tiles` is length 1 (a 2-D `[Mt,Nt]` config is silently dropped
+  post-collapse). `ops/ewadd` is the worked example.
+
+Tile choices must divide every op dim. Rejected loudly (do not work around):
+multi-dispatch, dynamic shape, M/N/K = 1 (matvec), non-f64. Tier-2 is an EXACT
+cross-check; an fp-*tolerance* gate for f32/f16 and the nonlinear activations is
+not built, so non-f64 stays out of scope.
+
+**Harness scope — what's worth tuning (`MEMORY_BOUND_GAP.md`):** operands are
+L3-resident; the dispatch DMAs tiles to TCDM. **Compute-bound** ops (matmul
+family) show a real tiling spread in-harness (gemm 2×) — tune these.
+**Memory-bound** ops (pure elementwise) are *bandwidth-bound*: the 3N DMA volume
+is fixed regardless of tiling, so the optimum is usually "don't tile" and the
+harness proves their *correctness*, not a perf win (a real win needs fusion or
+the whole-model path).
 
 ## Prerequisites
 
@@ -42,9 +57,11 @@ this checkout, fix the constant rather than guessing around it.
 
 ## The knobs (increasing scope / risk)
 
-1. `l1_tiles = [M,N,K]` (divisors of M,N,K) and `dual_buffer`.
-2. `l1_tiles_interchange` — **leave at [2,0,1]**; other orders SILENTLY MISCOMPILE
-   at multi-tile shapes (the gate catches them as FAIL, but don't chase them).
+1. `l1_tiles` (length = op rank: 3 for matmul `[M,N,K]`, 1 for elementwise;
+   divisors of each dim) and `dual_buffer`.
+2. `l1_tiles_interchange` — for matmul **leave at [2,0,1]**; other orders SILENTLY
+   MISCOMPILE at multi-tile shapes (the gate catches them as FAIL, but don't chase
+   them). Elementwise is 1-D so its only perm is `[0]` (trivial).
 3. **xDSL pass pipeline** (`--iree-quidditch-xdsl-passes`, threaded as `--passes`)
    — Group-B pass selection/ordering.
 4. **Agent-authored xDSL pass** (`author_pass.py`) — invent a novel structure by
@@ -86,8 +103,9 @@ sim + Tier-1/Tier-2; a faster-but-wrong proposal is reverted, never kept.
 submodule (broken → rejected; semantics-changing → caught).
 
 ### 3. Read the result
-`best_<name>.json` (winning `tag`/`config`=`[M,N,K,dual_buffer,interchange]`/`cycles`)
-and `results_<name>.tsv` (full grid); or `agent_loop.py --status` (best + history).
+`best_<name>.json` (winning `tag`/`config`=`(tiles, dual_buffer, interchange)`,
+where `tiles`/`interchange` have the op's rank/`cycles`) and `results_<name>.tsv`
+(full grid); or `agent_loop.py --status` (best + history).
 Only `correct=True` configs are eligible; `legal=False`/`correct=False` are excluded.
 
 ### 4. Apply the win (record -> apply)
@@ -97,18 +115,24 @@ python3 tools/autotune/apply.py --op <name>             # write best_<name>.json
 ```
 This deposits `best_<name>.json`'s `lowering_config` (l1_tiles/dual_buffer/interchange)
 back into the kernel `.mlir` -- the win lands in version-controlled source (commit
-it + re-run the IREE build to deploy). HAND-WRITTEN kernels only. Model kernels'
-tiling lives in `ConfigureForSnitch.cpp`'s per-dispatch table keyed on the
-`main$async_dispatch_*` name the tuner does not yet capture -- the remaining apply
-gap. Pipeline / authored-pass wins persist by editing the `Passes.td` default
-pipeline / committing the xdsl pass to the submodule, then rebuilding iree-compile.
+it + re-run the IREE build to deploy). HAND-WRITTEN kernels only. MODEL kernels'
+tiling is applied via `ConfigureForSnitch.cpp`'s data-driven config-table
+(`--iree-quidditch-config-table <json>`), keyed on the LIVE dispatch symbol
+`main_dispatch_<N>_<op>_<MxNxK>_f<bits>` (validated on the `twomm` proxy; NOT the
+pre-v3.11.0 `main$async_dispatch_*` form). The remaining apply gap is loop-wiring:
+`apply.py` does not yet upsert that JSON and the model build passes no flag
+(`MEMORY_BOUND_GAP.md` §5). Pipeline / authored-pass wins persist by editing the
+`Passes.td` default pipeline / committing the xdsl pass to the submodule, then
+rebuilding iree-compile.
 
 ### Multi-kernel / whole-model (Amdahl)
 `agent/profile_model.py` turns a per-dispatch cycle table into the orchestrator's
 profile JSON; `agent/orchestrate.py plan|next|record` (vendored from AutoKernel,
 MIT) schedules tuning by Amdahl cycle-share. Producing real per-dispatch cycles
-from a whole-model run (sim nsnet2 + `gen_trace.py` region→dispatch grouping,
-DM-core excluded) is the remaining mechanical step.
+from a whole-model run (sim a model + `gen_trace.py`; the region→dispatch-symbol
+grouping is the hard part, DM core hart_00008 excluded) is the remaining producer
+step. Use a compiling multi-dispatch proxy (`ops/twomm_model.mlir`) — nsnet2
+itself does not compile yet (GRU codegen gap).
 
 ## Correctness guarantee
 
@@ -130,3 +154,10 @@ win back into the .mlir), `ops/<name>.toml`.
 `tools/autotune/agent/`: `program.md` (playbook), `agent_loop.py` (search loop),
 `author_pass.py` + `example_passes/` (authored xDSL passes), `orchestrate.py`
 (MIT, Amdahl) + `profile_model.py`, `LICENSE.autokernel`.
+`ops/`: `gemm_square`/`gemm_tall`/`gemm_plain` (matmul), `ewadd` (1-D elementwise),
+`twomm_model.mlir` (multi-dispatch proxy that compiles).
+
+**Docs** (read these for the why): `KERNELS.md` (the op-library menu: ops, fused,
+status, widening order), `SNITCH_KERNEL_NOTES.md` (Snitch runtime/kernel reference
+— core-gating API, SSR/FREP idioms, the compute-core fp-gate unblock, op→reference
+mapping), `MEMORY_BOUND_GAP.md` (what's missing to tune memory-bound ops, ranked).
