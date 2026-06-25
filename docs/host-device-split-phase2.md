@@ -360,6 +360,91 @@ vector cluster). To make BOTH Quidditch-programmable (not just snitch_cluster):
   Phase-3 track** (needs the RVV codegen path + spatz runtime). Design the
   executable-target + tile-routing seam now so spatz drops in without a retrofit.
 
+## Heavy-campaign results (3 workstreams landed, verified + reviewed)
+
+1. **Device-half firmware** (`runtime/host/firmware/gwaihir/`, commit 555a00d):
+   rv32 Snitch QCS replayer on real snRuntime (DM core drives; compute cores run
+   the grid via hw-barrier fan-out), invoking the kernel through the IREE dispatch
+   ABI. Builds in gwaihir's tree (`qcs_replay.elf`, -Werror). Reviewed: barrier
+   protocol deadlock-free; fixed an untrusted-`dynamic_local_memory` OOB + an rv32
+   aperture guard. Stub kernel today.
+2. **SPLIT=ON codegen** (`quidditch_module.cmake`, commit 93a1ee1): one iree+xdsl
+   compile emits a `.vmfb` host module + a separable xDSL Snitch kernel `.o`, no
+   compiler rebuild.
+3. **Bare-metal rv64 IREE VM host runner** (scratch
+   `/scratch/dankeller/snitch-compiler/iree-rv64-host/`): a freestanding rv64 ELF
+   links the IREE VM + bytecode loader + platform glue + the embedded
+   `gemm_square.vmfb` and **runs under spike** — VM instance created, the host
+   module loaded, context-create correctly `NOT_FOUND` on unresolved HAL imports.
+   Recipe worth keeping: HTIF syscall-proxy stubs (`_write`/`_sbrk`/`_exit`), a
+   medany crt0 + linker script (DRAM @ 0x8000_0000, `.htif`/tohost), and
+   **medany libc/libm/libgcc stubs** because the newlib/libgcc `lp64d` multilib is
+   medlow and its absolute `lui` relocs overflow at DRAM (R_RISCV_HI20 truncation).
+
+### The convergence (join point) — cluster HAL on rv64
+The host VM result pinpoints the seam: `gemm_square.vmfb` imports `hal.*`
+(`hal.executable.create`, `hal.device.queue.execute`, command-buffer/buffer/fence).
+So the host VM needs an IREE **HAL module** registered — and that HAL is exactly
+Quidditch's **slice-2 cluster HAL** (`runtime/host/hal/cluster/`: cluster_device +
+cluster_command_buffer + cluster_allocator) ported to rv64 freestanding: it turns
+`hal.executable.create`/`queue.execute` into a **QCS stream in L2 SPM + a
+`cl_clint_set` doorbell**, which the committed device-half firmware replays. Wire
+the SPLIT kernel `.o` into the firmware's `gw_register_kernels`, point the host
+VM's HAL at the gwaihir L2-SPM region + doorbell, and that closes the loop:
+IREE VM (CVA6) -> QCS -> snitch_cluster -> iree+xdsl kernel -> completion. Then a
+Cheshire host test runs `gemm_square` on the gwaihir sim, verified vs reference
+(2a) -> full SUMMA (2b).
+
+### Join PROVEN (host half end-to-end) + the verifier finding
+The cluster HAL was registered as the VM's HAL module and the full host path RAN
+(proven on x86 with the identical cluster-HAL stack): `hal.*` imports RESOLVED ->
+context created -> `gemm_square.gemm64` invoked -> the HAL **recorded a well-formed
+QCS stream** (1 DISPATCH, exec=0 ord=0, 3 bindings x 2048 B = 16x16 f64 A/B/C at
+consecutive device-PAs). VA<->PA translation + binding-table resolution confirmed.
+Registration flow: instance -> `iree_hal_module_register_all_types` ->
+`qcs_shared_region_create` -> `iree_hal_cluster_device_create(id="quidditch_device")`
+(id MUST match the vmfb's `#hal.device.target`) -> device-group -> `iree_hal_module_create`
+-> bytecode module -> `context_create_with_modules([hal, bytecode])` -> resolve
+`gemm_square.gemm64` -> alloc inputs via the cluster allocator -> `iree_vm_invoke` ->
+`queue_execute` emits the QCS job. Real HAL fixes this surfaced (the slice-2 HAL was
+never run against a full bytecode module): executable cache + stub executable in
+cluster_device, `query_i64` answering `hal.executable.format`, and a DEFERRED
+command buffer resolving direct/indirect binding tables in cluster_command_buffer
+(being ported back into the repo + verified).
+
+**Verifier finding (gates RTL):** under spike, rv64 builds + runs but
+`context_create` does not finish in 595 s — time is in IREE's VM bytecode/flatbuffer
+verifier (`iree_vm_bytecode_function_verify_bytecode_op` + flatcc `verify_table`),
+pure emulation slowness, not a bug (x86 passes instantly). On cycle-accurate RTL
+this is worse, so the RTL deployment must **disable VM bytecode verification** (an
+IREE module-load knob) or pre-verify offline. Flag for the 2a co-sim.
+
+### Remaining to 2a
+1. DONE (dca21cc) — cluster-HAL fixes landed + x86-verified.
+2. DONE (0415511) — the real iree+xdsl gemm_square kernel links into the device
+   firmware (rv32, zero undef). ABI MATCH (ELF32 RISC-V ilp32d == gwaihir snitch
+   LLVM). Registered via the library-query path (the dispatch entry is a LOCAL
+   symbol; only `quidditch_..._library_query` is global) as harness.c:100 does;
+   the kernel's static-inline snRuntime refs resolved via the quidditch_snrt_exports
+   shim. lib/ = generated SPLIT output (gitignored).
+3. DONE (investigated) — VM bytecode verification disable for host-VM-on-RTL:
+   `-DIREE_VM_BYTECODE_VERIFICATION_ENABLE=0` (config.h override) compiles out the
+   per-op verifier; add a 1-line `#if` guard around the flatcc
+   `BytecodeModuleDef_verify_as_root` (verifier.c:24-30), then REBUILD the rv64 IREE
+   libs. Compile-time only; safe for the self-produced deploy module (keep ON in CI).
+4. TODO — **dma-core fan-out (functional, before the gemm computes)**: the kernel
+   splits into `compute_core_ptrs` (compute cores) + `dma_core_ptrs` (DM core); both
+   are in the elf (`$xdsl_kernel0/1` + `$dma`). The firmware runs only the compute
+   half — the DISPATCH handler must ALSO run `dma_core_ptrs[ord]` on the DM core
+   concurrently (the dispatch.c/harness model). Extend qcs_replay's table + fan-out
+   to carry + run both halves.
+5. TODO — point freestanding `shared_region.c` at gwaihir HW: `region->base` =
+   cluster L2-SPM aperture; `qcs_doorbell_ring` -> cluster `cl_clint_set` (msip) MMIO;
+   drop the auto-complete; `qcs_doorbell_wait_completion` polls the real completion/
+   status the DM core writes back.
+6. TODO — rebuild rv64 IREE with verification off; co-sim on Questa (host VM on CVA6
+   + the cluster firmware); verify `gemm_square` C == A@B vs a host reference.
+
 ## Status
 
 Phase 1 complete (dev-box split end-to-end). Phase 2 SoC = **gwaihir**, validated
