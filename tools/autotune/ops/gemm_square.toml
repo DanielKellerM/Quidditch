@@ -1,0 +1,24 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Autotuner op-spec for the gemm_square sample: C[16,16] = A[16,16] @ B[16,16]^T,
+# f64, transpose-b via explicit indexing_maps. Encodes the kernel exactly as
+# built so `sweep.py --op gemm_square` reproduces the committed 1420-cyc oracle.
+name        = "gemm_square"
+mlir        = "runtime/samples/gemm_square/gemm_square.mlir"
+entry       = "gemm64"                  # query symbol quidditch_gemm64_dispatch_0_library_query
+module      = "gemm_mod"                # quidditch_module DST -> #include <gemm_mod.h>
+op          = "matmul_transpose_b"      # C[i,j] = sum_k A[i,k] * B[j,k]
+dtype       = "f64"
+transpose_b = true
+shape       = { M = 16, N = 16, K = 16 }
+bindings    = ["A", "B", "C"]           # ordered, matches binding_ptrs[]
+
+[knobs]
+l1_tiles             = { type = "triple", choices = [4, 8, 16] }
+dual_buffer          = { type = "bool" }
+l1_tiles_interchange = { type = "perm", choices = [[2, 0, 1]] }
+
+[validation]
+baseline_tag = "8x8x8_dbtrue"           # speedup denominator only, never a correctness ref

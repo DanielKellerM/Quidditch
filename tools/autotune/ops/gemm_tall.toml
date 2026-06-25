@@ -1,0 +1,24 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Second autotuner kernel: non-square C[32,16] = A[32,16] @ B[16,16]^T, f64.
+# Proves the op-spec / generated-harness / direct-build path tunes a kernel
+# that has no CMake target (direct_build compiles its harness.o).
+name        = "gemm_tall"
+mlir        = "tools/autotune/ops/gemm_tall.mlir"
+entry       = "gemm_tall"               # quidditch_gemm_tall_dispatch_0_library_query
+module      = "gemm_tall_mod"           # #include <gemm_tall_mod.h>
+op          = "matmul_transpose_b"      # C[i,j] = sum_k A[i,k] * B[j,k]
+dtype       = "f64"
+transpose_b = true
+shape       = { M = 32, N = 16, K = 16 }
+bindings    = ["A", "B", "C"]
+
+[knobs]
+l1_tiles             = { type = "triple", choices = [4, 8, 16] }
+dual_buffer          = { type = "bool" }
+l1_tiles_interchange = { type = "perm", choices = [[2, 0, 1]] }
+
+[validation]
+baseline_tag = "8x8x8_dbtrue"

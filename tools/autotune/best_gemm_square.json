@@ -1,0 +1,19 @@
+{
+  "tag": "16x16x16_dbfalse",
+  "config": [
+    16,
+    16,
+    16,
+    "false",
+    [
+      2,
+      0,
+      1
+    ]
+  ],
+  "legal": true,
+  "ok": true,
+  "cycles": 1436,
+  "errors": 0,
+  "kernel": "gemm_square"
+}
