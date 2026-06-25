@@ -1,0 +1,9 @@
+package:
+  name: quidditch
+  authors:
+    - "Daniel Keller <dankeller@ethz.ch>"
+
+# HW IP via Bender (gitignored .bender/), not submodules; uv stays for Python.
+# Bender.lock seeded from cheshire's frozen lock: use `bender checkout`, not `update`.
+dependencies:
+  cheshire: { git: "https://github.com/pulp-platform/cheshire.git", version: 0.3.1 }
