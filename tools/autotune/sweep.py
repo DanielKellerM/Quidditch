@@ -143,13 +143,14 @@ def run_sim(tag, elf):
     return (int(m.group(1)), int(m.group(2)), m.group(3)) if m else None
 
 
-def pipeline(c, spec, harness_obj):
-    """Full build->sim for one config in an isolated dir (parallel-safe)."""
+def pipeline(c, spec, harness_obj, xdsl_passes=None):
+    """Full build->sim for one config in an isolated dir (parallel-safe).
+    xdsl_passes overrides the xdsl-opt pass pipeline (Group-B knob); None = default."""
     tag = tag_of(c)
     outdir = tempfile.mkdtemp(dir=WORK, prefix=f"{tag}_")
     cfg = {"l1_tiles": list(c[:3]), "dual_buffer": c[3], "interchange": list(c[4])}
-    elf, err = direct_build(cfg, outdir, mlir_template=spec.mlir,
-                            module=spec.module, harness_obj=harness_obj)
+    elf, err = direct_build(cfg, outdir, mlir_template=spec.mlir, module=spec.module,
+                            harness_obj=harness_obj, xdsl_passes=xdsl_passes)
     if err is not None:          # stderr 'error:' legality gate fired
         return {"tag": tag, "config": c, "legal": False}
     res = run_sim(tag, elf)

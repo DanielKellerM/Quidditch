@@ -79,6 +79,7 @@ public:
 struct QuidditchTargetOptions {
   std::string staticLibraryOutputPath;
   std::string xDSLOptPath;
+  std::string xDSLPasses = "arith-add-fastmath,test-lower-linalg-to-snitch";
   std::string toolChainRoot;
   bool assertCompiled = false;
   // TODO: This should actually be 112640 but DMA stack overflows. Ooopsie!
@@ -104,6 +105,11 @@ struct QuidditchTargetOptions {
                             llvm::cl::cat(category),
                             llvm::cl::desc("Path to the 'xdsl-opt' executable "
                                            "to use for kernel compilation."));
+    binder.opt<std::string>("iree-quidditch-xdsl-passes", xDSLPasses,
+                            llvm::cl::cat(category),
+                            llvm::cl::desc("The xdsl-opt pass pipeline (-p) used "
+                                           "to lower each kernel; the autotuner "
+                                           "sweeps Group-B pass knobs via this."));
     binder.opt<std::string>(
         "iree-quidditch-toolchain-root", toolChainRoot, llvm::cl::cat(category),
         llvm::cl::desc("Path to the root directory of the Quidditch toolchain "
@@ -263,7 +269,8 @@ public:
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
     modulePassManager.addPass(quidditch::createConvertToRISCVPass(
-        {targetOptions.xDSLOptPath, targetOptions.assertCompiled}));
+        {targetOptions.xDSLOptPath, targetOptions.assertCompiled,
+         targetOptions.xDSLPasses}));
 
     FunctionLikeNest(modulePassManager)
         .addPass(IREE::LinalgExt::createLinalgExtToLoopsPass)
