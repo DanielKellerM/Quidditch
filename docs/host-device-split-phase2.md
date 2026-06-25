@@ -483,6 +483,45 @@ IREE module-load knob) or pre-verify offline. Flag for the 2a co-sim.
    - Artifacts: /scratch/.../iree-rv64-host/cheshire/ + the rebuilt qcs_replay.elf +
      a tb_gwaihir_top.sv backdoor-preload edit (scratch only).
 
+## Correctness audit (no-workarounds pass)
+
+A deep 3-angle audit (stubs/glue, sim/build, codegen/kernel) + user review classified
+every accumulated change. The device path is REAL (not hollow): the kernel in
+qcs_replay.elf is genuinely xDSL-lowered (stub not even linked), the ABI is
+byte-correct, both halves do real DMA+compute, bindings are honest. Workarounds to
+retire, with the principled fix:
+
+1. **64MB-DRAM arena** = workaround for a **bloated command buffer** (update_data[64KB]
+   x 256 records = ~16.8MB malloc per dispatch). FIXED at root (commit bc0a451):
+   update_data is heap-on-demand, MAX_RECORDS 256->64, command buffer ~83KB. The VM
+   now fits sane memory like original Quidditch; the 64MB arena is gone.
+2. **Hand-stubbed libc/libm/libgcc** = workaround for building freestanding instead of
+   the way Cheshire builds DRAM SW. PRINCIPLED FIX: build the host with the REAL IIS
+   toolchain — `-mcmodel=medany -mexplicit-relocs` (as cheshire/sw/sw.mk:27), real
+   libc/libm/libgcc. Our riscv64-gcc-12.2.0 libgcc is medlow (130 absolute R_RISCV_HI20
+   relocs -> overflow at DRAM); **riscv64-gcc-13.2.0 / 14.2.0** ship rv64imafdc/lp64d
+   libgcc with ZERO absolute HI20 -> use one of those to link at DRAM. The "approximate"
+   libm (exp/log/pow — actually wrong, e.g. pow(-2,2)=0) is DEAD on the gemm path (no
+   vm.math ops); exclude it (or fail-fast), don't ship silently-wrong math.
+3. **Hybrid .text->128KiB Cheshire SPM** = sim-crutch that won't scale (the real EmitC
+   host is ~900KB). PRINCIPLED FIX: run the host from **DRAM** (Cheshire ships
+   sw/link/dram.ld; DRAM is CVA6-executable+cached+functional — the earlier "DRAM bus
+   error" was an LLC-config symptom). The real unfixed bug it routed around is
+   L2-SPM<->CVA6 LLC coherence; DRAM-in-cache-mode solves it properly.
+4. **verify-off** = principled and MOOT under the EmitC native host (no bytecode/flatcc).
+5. **descriptor-offset** = principled (real collision); landed as a named constant
+   QCS_JOB_DESCRIPTOR_OFFSET (commit 1e8d08d).
+
+**CORRECTED golden:** the kernel is **matmul_transpose_b** (C[i,j]=sum_k A[i,k]*B[j,k]),
+NOT plain matmul. The values 43792/1092352 used earlier are for PLAIN matmul and are
+WRONG for this op — recompute the transpose_b golden for whatever deterministic A,B the
+host uses, and verify against THAT. The in-tree harness (runtime/samples/gemm_square)
+already uses the correct op + golden.
+
+**Process note:** the RTL co-sim is one long serialized run — do NOT drive it with
+parallel agents (that thrashed the shared Questa work lib). One controlled build + one
+cosim + the corrected-golden check.
+
 ## Status
 
 Phase 1 complete (dev-box split end-to-end). Phase 2 SoC = **gwaihir**, validated
