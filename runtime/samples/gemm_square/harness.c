@@ -144,5 +144,23 @@ int main(void) {
   if (errors)
     printf("[HARNESS] first mismatch (%d,%d) got=%d want=%d\n",
            first_i, first_j, first_got, first_want);
+
+#ifdef HARNESS_DUMP_OUTPUT
+  // Tier-2: FNV-1a hash of the raw output bytes for an independent host-side
+  // cross-check. The DM core has no FPU, so this is a bytewise integer hash (no
+  // fp), emitted as ONE line -- a per-element dump floods the sim console past
+  // its cycle budget. Compiled out by default: the Tier-1 sweep path is byte-
+  // identical. Exact identity only (fp-tolerance comes with real-fp inputs).
+  {
+    uint32_t h = 2166136261u;
+    const unsigned char* p = (const unsigned char*)C;
+    int nbytes = MM * NN * (int)sizeof(elem_t);
+    for (int b = 0; b < nbytes; b++) {
+      h ^= p[b];
+      h *= 16777619u;
+    }
+    printf("[OUTHASH] %d %08x\n", MM * NN, h);
+  }
+#endif
   return errors ? 1 : 0;
 }

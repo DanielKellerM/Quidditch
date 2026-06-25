@@ -126,10 +126,7 @@ ConvertToRISCV::convertToRISCVAssembly(MemRefMicrokernelOp kernelOp,
                                                  /*stderr=*/stderrFile.str()};
   int ret = llvm::sys::ExecuteAndWait(
       xDSLOptPath,
-      {xDSLOptPath, "-p",
-       "arith-add-fastmath,"
-       "test-lower-linalg-to-snitch",
-       "-t", "riscv-asm"},
+      {xDSLOptPath, "-p", xDSLPasses, "-t", "riscv-asm"},
       std::nullopt, redirects);
   if (ret != 0) {
     auto diagEmit =

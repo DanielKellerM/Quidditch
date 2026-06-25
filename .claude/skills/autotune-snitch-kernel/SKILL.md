@@ -1,106 +1,132 @@
 ---
 name: autotune-snitch-kernel
 description: >-
-  Find the fastest correctness-preserving L1 tiling (l1_tiles + dual_buffer) for
-  a Quidditch/xDSL Snitch matmul kernel by RTL simulation. Use when optimizing a
-  single-dispatch f64 matmul / matmul_transpose_b .mlir kernel's dispatch cycles
-  on the Snitch cluster. Scaffolds an op-spec from the .mlir, sweeps the tiling
-  grid (cost-model-ranked, parallel, ninja-free), and reports the winning config.
+  Optimize a Quidditch/xDSL Snitch kernel's dispatch cycles by RTL simulation,
+  across abstraction layers: L1 tiling (l1_tiles, dual_buffer, interchange), the
+  xDSL pass pipeline, and agent-authored xDSL passes. Two drivers -- a
+  deterministic cost-model-ranked grid sweep, and an LLM-agent-driven search
+  (propose -> evaluate -> keep/revert) -- plus multi-kernel Amdahl orchestration,
+  all behind sound correctness gates. Use when optimizing a single-dispatch f64
+  matmul / matmul_transpose_b .mlir kernel or improving its xDSL lowering.
 ---
 
-# Autotune a Snitch/Quidditch kernel
+# Autotune / optimize a Snitch/Quidditch kernel
 
-This skill drives `tools/autotune/` to search a kernel's L1 tiling space and
-return the fastest tiling that still computes the correct result. The oracle is
-a standalone harness that drives the IREE-generated Quidditch dispatch directly
-(no VM/HAL) on the Verilator RTL sim and reports `dispatch_cycles`; correctness
-is a per-element integer-exact check against a host reference.
+This skill drives `tools/autotune/` to lower a kernel's `dispatch_cycles` while
+preserving correctness. The oracle is a standalone harness that drives the
+IREE-generated Quidditch dispatch directly (no VM/HAL) on the Verilator RTL sim;
+correctness is gated by Tier-1 (per-element exact, in-harness) **and** Tier-2 (an
+independent off-toolchain host cross-check). You can drive it two ways:
+
+- **Deterministic** (`sweep.py`): enumerate the knob grid, cost-model-rank it,
+  build+sim in parallel, keep the best. Exhaustive on the validated knobs.
+- **Agent-driven** (`agent_loop.py` + `author_pass.py`, following
+  `agent/program.md`): *you* are the search policy — propose configs, pipeline
+  variants, or hand-authored xDSL passes; the gates keep only correct + faster.
 
 ## Scope (v1)
 
-Supported: a **single-dispatch, static-shape, f64 `matmul` or `matmul_transpose_b`**
-kernel (one `linalg` op; explicit `indexing_maps` or a named matmul). Tile choices
-must divide M, N, K. Knobs tuned: `l1_tiles = [M,N,K]` and `dual_buffer`.
-
-Out of scope (the tools reject these loudly — do not work around it): multi-op /
-multi-dispatch kernels, dynamic shapes, `M`/`N`/`K` = 1 (matvec), `dtype` other
-than f64, and elementwise ops. f32/f16 + elementwise need the not-yet-built
-host-side fp-tolerance gate (Tier-2).
+A **single-dispatch, static-shape, f64 `matmul` / `matmul_transpose_b`** kernel
+(one `linalg` op). Tile choices must divide M,N,K. Rejected loudly (do not work
+around): multi-dispatch, dynamic shape, M/N/K = 1 (matvec), non-f64, elementwise.
+Note: Tier-2 is an EXACT cross-check; an fp-*tolerance* gate for f32/f16 is not
+built, so non-f64 stays out of scope.
 
 ## Prerequisites
 
-Run from the Quidditch repo root. These must already exist (they are the normal
-autotuner environment, not set up by this skill):
-- `build-rt/` populated (the IREE/Quidditch runtime built once with the snitch toolchain).
-- `venv/bin/ninja` (1.13), the snitch `iree-compile`, `xdsl-opt`, and the colluca LLVM toolchain — paths are hardcoded in `tools/autotune/direct_build.py`.
-- The Verilator sim `snitch_cluster/target/sim/build/bin/snitch_cluster.vlt`.
+Run from the Quidditch repo root (these are the normal autotuner environment):
+`build-rt/` populated; `venv/bin/ninja`; the snitch `iree-compile`, `.venv/bin/xdsl-opt`,
+and the colluca LLVM toolchain (paths hardcoded in `direct_build.py`); the sim
+`snitch_cluster/target/sim/build/bin/snitch_cluster.vlt`. If a path is wrong for
+this checkout, fix the constant rather than guessing around it.
 
-If a build path is wrong for this checkout, fix the constant in `direct_build.py`
-/ `sweep.py` rather than guessing around it.
+## The knobs (increasing scope / risk)
+
+1. `l1_tiles = [M,N,K]` (divisors of M,N,K) and `dual_buffer`.
+2. `l1_tiles_interchange` — **leave at [2,0,1]**; other orders SILENTLY MISCOMPILE
+   at multi-tile shapes (the gate catches them as FAIL, but don't chase them).
+3. **xDSL pass pipeline** (`--iree-quidditch-xdsl-passes`, threaded as `--passes`)
+   — Group-B pass selection/ordering.
+4. **Agent-authored xDSL pass** (`author_pass.py`) — invent a novel structure by
+   writing a `ModulePass`; registered + run + gated + reverted automatically.
 
 ## Workflow
 
-### 1. Describe the kernel as an op-spec
-
-If the kernel does not already have `tools/autotune/ops/<name>.toml`, scaffold it
-from the `.mlir`:
-
+### 1. Scaffold the op-spec
 ```bash
 python3 tools/autotune/scaffold_op.py <name> <path/to/kernel.mlir>
 ```
+Derives `entry`, `dtype`, `shape`, `transpose_b`, tile choices from the `.mlir`,
+writes `ops/<name>.toml`, validates it (out-of-scope kernels rejected here —
+report, don't patch). **Review `module`** (the `quidditch_module` DST, default
+`<name>_mod`). `ops/gemm_tall.toml` is a worked example.
 
-This derives `entry` (func symbol), `dtype`, `shape`, `transpose_b`, and tile
-choices from the `.mlir`, writes `ops/<name>.toml`, and validates it. Most
-out-of-scope kernels (multi-dispatch, dynamic shape, matvec, non-divisor tiles,
-non-f64) are rejected here with a clear message; a few deeper checks (symmetric
-inputs, shape↔maps disagreement) fire when you run the sweep. Either way, report
-the rejection — don't patch around it. **Review `module`** in the generated TOML: it is the
-`quidditch_module` DST (`#include <<module>.h>`), a build choice not present in
-the `.mlir`; the default is `<name>_mod`. `ops/gemm_tall.toml` is a worked example.
-
-### 2. Run the sweep
-
+### 2a. Deterministic sweep
 ```bash
-python3 tools/autotune/sweep.py --op <name>
+python3 tools/autotune/sweep.py --op <name>          # full grid (16-way parallel)
+python3 tools/autotune/sweep.py --op <name> --budget K   # sim only the top-K cost-ranked
 ```
+3-tile kernels are 3³×2 = 54 configs (~90 s); more divisors → up to 5³×2 = 250,
+so use `--budget` to bound runtime (the model only sequences; the optimum is never
+pruned). gemm_square also runs a dual-build canary (direct == CMake).
 
-Enumerates the `l1_tiles × dual_buffer` grid (every tile choice cubed × 2), ranks
-it by the analytic cost model, then builds + sims each config through a parallel
-ninja-free pipeline (16-way). The example 3-tile kernels are 3³×2 = 54 configs
-(~90 s); a kernel divisible by more of {4,8,16,32,64} can reach 5³×2 = 250, so use
-`--budget K` to sim only the top-K cost-ranked configs and bound runtime (the model
-only sequences; the optimum is never structurally pruned).
-
-For `gemm_square` only, a dual-build canary first asserts the ninja-free build is
-stripped-identical to CMake's. Other kernels skip it (they have no CMake target —
-the direct build is the only build).
+### 2b. Agent-driven search (you, following `agent/program.md`)
+```bash
+python3 tools/autotune/agent/agent_loop.py --op <name> --propose "16,16,16,true"
+python3 tools/autotune/agent/agent_loop.py --op <name> --propose "16,16,16,true" --passes "<pipeline>"
+python3 tools/autotune/agent/author_pass.py --op <name> --pass-file <authored_pass.py>
+python3 tools/autotune/agent/agent_loop.py --op <name> --status
+```
+Read `agent/program.md` first — it has the hardware model (8 compute + 1 no-FPU DM
+core, FREP/SSR ~0.87 ceiling, iDMA, dual_buffer), the Amdahl-ordered tiers, and
+the keep/revert rules. Each proposal goes through the cost-model pre-rank + RTL
+sim + Tier-1/Tier-2; a faster-but-wrong proposal is reverted, never kept.
+`author_pass.py` lets you write a `ModulePass` (template: `example_passes/agent_noop.py`)
+— it registers it in xdsl, runs it in the pipeline, gates it, and reverts the
+submodule (broken → rejected; semantics-changing → caught).
 
 ### 3. Read the result
+`best_<name>.json` (winning `tag`/`config`=`[M,N,K,dual_buffer,interchange]`/`cycles`)
+and `results_<name>.tsv` (full grid); or `agent_loop.py --status` (best + history).
+Only `correct=True` configs are eligible; `legal=False`/`correct=False` are excluded.
 
-- `tools/autotune/best_<name>.json` — the winning `tag`, `config` (`[M,N,K,dual_buffer,l1_tiles_interchange]`), `cycles`, and `kernel`.
-- `tools/autotune/results_<name>.tsv` — every config: `legal`, `correct`, `cycles`, `speedup_vs_base`, `cost_rank`.
+### 4. Apply the win (record -> apply)
+```bash
+python3 tools/autotune/apply.py --op <name> --dry-run   # preview the lowering_config change
+python3 tools/autotune/apply.py --op <name>             # write best_<name>.json into the .mlir
+```
+This deposits `best_<name>.json`'s `lowering_config` (l1_tiles/dual_buffer/interchange)
+back into the kernel `.mlir` -- the win lands in version-controlled source (commit
+it + re-run the IREE build to deploy). HAND-WRITTEN kernels only. Model kernels'
+tiling lives in `ConfigureForSnitch.cpp`'s per-dispatch table keyed on the
+`main$async_dispatch_*` name the tuner does not yet capture -- the remaining apply
+gap. Pipeline / authored-pass wins persist by editing the `Passes.td` default
+pipeline / committing the xdsl pass to the submodule, then rebuilding iree-compile.
 
-Report the best tiling and its speedup over the spec's `baseline_tag`. Only
-configs with `correct=True` are eligible; `legal=False` (rejected at compile) and
-`correct=False` (output ≠ reference) configs are excluded and worth flagging.
-
-### 4. Apply the winning tiling (if asked)
-
-Edit the kernel `.mlir`'s `lowering_config` to the winning `l1_tiles` and
-`dual_buffer`. Re-running the full IREE flow then picks it up (no compiler change).
+### Multi-kernel / whole-model (Amdahl)
+`agent/profile_model.py` turns a per-dispatch cycle table into the orchestrator's
+profile JSON; `agent/orchestrate.py plan|next|record` (vendored from AutoKernel,
+MIT) schedules tuning by Amdahl cycle-share. Producing real per-dispatch cycles
+from a whole-model run (sim nsnet2 + `gen_trace.py` region→dispatch grouping,
+DM-core excluded) is the remaining mechanical step.
 
 ## Correctness guarantee
 
-Every sim run checks the kernel output **per element** against a host reference
-computed from structured, asymmetric integer inputs (exact in int32 — the DM core
-has no FPU, so the reference is integer-only). The generator refuses to emit a
-harness whose inputs alias or are symmetric, so transpose / index-swap / operand-
-swap miscompiles are caught — a config that miscomputes is marked `FAIL` and never
-reported as best. This is the gate; do not relax or bypass it.
+EVERY avenue — tile config, interchange, pass pipeline, or an authored pass —
+flows through the same gates: Tier-1 per-element exact (structured asymmetric
+integer inputs; the generator refuses aliasing/symmetric inputs) + Tier-2
+independent host FNV cross-check (`tier2.py`). A faster-but-WRONG result is
+reverted, never kept or reported. **Never modify** the harness, the `read_csr(mcycle)`
+ROI, or the dispatch markers (frozen — that's gaming the metric). No workarounds:
+report rejections; if the kernel is already near the roofline, say so and stop.
 
 ## Files
 
-`tools/autotune/`: `spec.py` (op-spec loader + scope gate), `scaffold_op.py`
-(spec from .mlir), `gen_harness.py` + `harness.c.in` (generated harness + Tier-1
-gate), `direct_build.py` (ninja-free per-config build + `compile_harness`),
-`cost_model.py` (ranker), `sweep.py` (the driver), `ops/<name>.toml` (specs).
+`tools/autotune/`: `spec.py` (op-spec + scope gate), `scaffold_op.py`,
+`gen_harness.py` + `harness.c.in` (generated harness, Tier-1 + the `-DHARNESS_DUMP_OUTPUT`
+hash), `direct_build.py` (ninja-free build + `compile_harness` + the `xdsl_passes`
+knob), `cost_model.py`, `sweep.py`, `tier2.py` (Tier-2), `apply.py` (write a recorded
+win back into the .mlir), `ops/<name>.toml`.
+`tools/autotune/agent/`: `program.md` (playbook), `agent_loop.py` (search loop),
+`author_pass.py` + `example_passes/` (authored xDSL passes), `orchestrate.py`
+(MIT, Amdahl) + `profile_model.py`, `LICENSE.autokernel`.

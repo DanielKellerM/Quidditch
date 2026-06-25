@@ -121,16 +121,17 @@ def _inject(mlir_text, l1_tiles, dual_buffer, interchange=None):
     return s
 
 
-def compile_harness(harness_c, module, query_symbol, out_obj):
+def compile_harness(harness_c, module, query_symbol, out_obj, defines=()):
     """Compile a generated harness.c -> thin-LTO object (config-invariant; built
     once per op). Synthesizes a minimal <module>.h (query declaration) so it does
-    not need iree-compile to have run first. Returns (out_obj, None) or (None, err)."""
+    not need iree-compile to have run first. `defines` adds extra -D flags (e.g.
+    -DHARNESS_DUMP_OUTPUT for the Tier-2 cross-check). Returns (out_obj, None) or (None, err)."""
     tmp = tempfile.mkdtemp(prefix="qd_harness_")
     try:
         with open(os.path.join(tmp, f"{module}.h"), "w") as f:
             f.write(_MODULE_H.format(query=query_symbol))
         r = subprocess.run(
-            [CLANG, *CONST_DEFS, f"-I{tmp}", *(f"-I{d}" for d in CONST_INCLUDES),
+            [CLANG, *CONST_DEFS, *defines, f"-I{tmp}", *(f"-I{d}" for d in CONST_INCLUDES),
              *(f"-I{d}" for d in HARNESS_INC),
              *sum((["-isystem", d] for d in HARNESS_ISYSTEM), []),
              *CFLAGS, "-Wno-undefined-inline", "-o", out_obj, "-c", harness_c],
@@ -142,7 +143,8 @@ def compile_harness(harness_c, module, query_symbol, out_obj):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def build(config, outdir, mlir_template=None, module="gemm_mod", harness_obj=None):
+def build(config, outdir, mlir_template=None, module="gemm_mod", harness_obj=None,
+          xdsl_passes=None):
     """Build a harness ELF for `config` into an isolated temp dir.
 
     config        = {"l1_tiles": [M,N,K], "dual_buffer": "true"|"false"}
@@ -190,6 +192,7 @@ def build(config, outdir, mlir_template=None, module="gemm_mod", harness_obj=Non
          f"--iree-quidditch-xdsl-opt-path={XDSL_OPT}",
          f"--iree-quidditch-toolchain-root={TOOLCHAIN_ROOT}",
          "--iree-quidditch-assert-compiled=true",
+         *([f"--iree-quidditch-xdsl-passes={xdsl_passes}"] if xdsl_passes else []),
          "--output-format=vm-c",
          "--iree-vm-target-index-bits=32",
          mlir, "-o", h],
