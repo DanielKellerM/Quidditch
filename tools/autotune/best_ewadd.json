@@ -1,0 +1,17 @@
+{
+  "tag": "256_dbtrue",
+  "config": [
+    [
+      256
+    ],
+    "true",
+    [
+      0
+    ]
+  ],
+  "legal": true,
+  "ok": true,
+  "cycles": 767,
+  "errors": 0,
+  "kernel": "ewadd"
+}

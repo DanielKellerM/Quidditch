@@ -29,6 +29,7 @@ for other ops it is skipped with a warning.
 import argparse
 import concurrent.futures
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -56,23 +57,31 @@ SIM_WORKERS = 16
 HARNESS_RE = re.compile(r"dispatch_cycles=(\d+).*?errors=(\d+)/\d+\s*->\s*(\w+)")
 
 
-def tag_of(c):
-    base = f"{c[0]}x{c[1]}x{c[2]}_db{c[3]}"
-    ix = tuple(c[4]) if len(c) > 4 else (2, 0, 1)
-    return base if ix == (2, 0, 1) else f"{base}_i{ix[0]}{ix[1]}{ix[2]}"
+def tag_of(c, spec):
+    tiles, db, ix = c
+    base = "x".join(str(t) for t in tiles) + f"_db{db}"
+    if list(ix) == spec.default_interchange:
+        return base
+    return base + "_i" + "".join(str(t) for t in ix)
 
 
 def enumerate_grid(spec):
-    return [(mt, nt, kt, db, tuple(ix))
-            for mt in spec.tile_choices for nt in spec.tile_choices
-            for kt in spec.tile_choices for db in spec.dual_buffer
+    # config = (tiles, dual_buffer, interchange); tiles/ix have spec.ndims entries
+    # (3 for matmul M,N,K; 2 for a 2D elementwise op).
+    return [(tiles, db, tuple(ix))
+            for tiles in itertools.product(spec.tile_choices, repeat=spec.ndims)
+            for db in spec.dual_buffer
             for ix in spec.interchange_choices]
 
 
 def rank_grid(grid, spec):
+    # The cost model is a gemm roofline -> only ranks matmul. Elementwise grids are
+    # small + memory-bound (the model does not apply); sim them all, unranked.
+    if spec.op not in ("matmul", "matmul_transpose_b"):
+        return list(grid)
     # cost_model is blind to interchange (KSPLIT/MSPLIT use tile counts only), so
     # interchange variants of a tile tuple rank together and are all simmed.
-    return sorted(grid, key=lambda c: cost_model([c[0], c[1], c[2]], c[3], spec.shape))
+    return sorted(grid, key=lambda c: cost_model(list(c[0]), c[1], spec.shape))
 
 
 def _strip_md5(elf):
@@ -84,10 +93,12 @@ def _strip_md5(elf):
 
 def ninja_build(c, outdir, spec, ninja_elf):
     """Build one config via the real CMake/ninja path (only for the canary)."""
+    tiles, db, _ix = c
     orig = open(spec.mlir).read()
     try:
-        s = re.sub(r"l1_tiles = \[[0-9, ]+\]", f"l1_tiles = [{c[0]}, {c[1]}, {c[2]}]", orig)
-        s = re.sub(r"dual_buffer = (?:true|false)", f"dual_buffer = {c[3]}", s)
+        s = re.sub(r"l1_tiles = \[[0-9, ]+\]",
+                   f"l1_tiles = [{', '.join(str(t) for t in tiles)}]", orig)
+        s = re.sub(r"dual_buffer = (?:true|false)", f"dual_buffer = {db}", s)
         open(spec.mlir, "w").write(s)
         env = dict(os.environ, CCACHE_DIR=CCACHE)
         r = subprocess.run([NINJA, "-C", BUILD, "gemm_harness"], env=env,
@@ -110,11 +121,11 @@ def canary_check(spec, canary, ninja_elf):
               "direct-vs-ninja equivalence is only checkable for gemm_square", flush=True)
         return
     d = tempfile.mkdtemp(dir=WORK, prefix="canary_")
-    elf_direct, err = direct_build({"l1_tiles": list(canary[:3]), "dual_buffer": canary[3],
-                                    "interchange": list(canary[4])},
+    elf_direct, err = direct_build({"l1_tiles": list(canary[0]), "dual_buffer": canary[1],
+                                    "interchange": list(canary[2])},
                                    d, mlir_template=spec.mlir, module=spec.module)
     if err:
-        sys.exit(f"CANARY ABORT: direct build of {tag_of(canary)} failed:\n{err}")
+        sys.exit(f"CANARY ABORT: direct build of {tag_of(canary, spec)} failed:\n{err}")
     elf_ninja = ninja_build(canary, d, spec, ninja_elf)
     if elf_ninja is None:
         sys.exit("CANARY ABORT: ninja build of the canary config failed")
@@ -146,9 +157,10 @@ def run_sim(tag, elf):
 def pipeline(c, spec, harness_obj, xdsl_passes=None):
     """Full build->sim for one config in an isolated dir (parallel-safe).
     xdsl_passes overrides the xdsl-opt pass pipeline (Group-B knob); None = default."""
-    tag = tag_of(c)
+    tiles, db, ix = c
+    tag = tag_of(c, spec)
     outdir = tempfile.mkdtemp(dir=WORK, prefix=f"{tag}_")
-    cfg = {"l1_tiles": list(c[:3]), "dual_buffer": c[3], "interchange": list(c[4])}
+    cfg = {"l1_tiles": list(tiles), "dual_buffer": db, "interchange": list(ix)}
     elf, err = direct_build(cfg, outdir, mlir_template=spec.mlir, module=spec.module,
                             harness_obj=harness_obj, xdsl_passes=xdsl_passes)
     if err is not None:          # stderr 'error:' legality gate fired
@@ -200,7 +212,8 @@ def main():
     except SpecError as e:
         sys.exit(str(e))
     db_canary = "true" if "true" in spec.dual_buffer else "false"
-    canary = (max(spec.tile_choices),) * 3 + (db_canary, (2, 0, 1))
+    canary = ((max(spec.tile_choices),) * spec.ndims, db_canary,
+              tuple(spec.default_interchange))
     ninja_elf = f"{BUILD}/samples/{spec.name}/gemm_harness"
     baseline_tag = spec.baseline_tag
     out_tsv = f"{ROOT}/tools/autotune/results_{spec.name}.tsv"
@@ -242,7 +255,7 @@ def main():
           + (f" (vs {baseline_tag}={base})" if base else "") + " ===")
     with open(out_tsv, "w") as f:
         f.write("kernel\ttag\tlegal\tcorrect\tcycles\tspeedup_vs_base\tcost_rank\n")
-        rank_idx = {tag_of(c): i for i, c in enumerate(ranked)}
+        rank_idx = {tag_of(c, spec): i for i, c in enumerate(ranked)}
         for r in sorted(results, key=lambda r: r.get("cycles") or 1 << 30):
             sp = f"{base / r['cycles']:.3f}" if (r.get("ok") and base) else ""
             if r.get("ok") and base:

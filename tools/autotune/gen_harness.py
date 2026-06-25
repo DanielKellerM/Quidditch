@@ -10,8 +10,9 @@ correctness gate). Before generating, the spec's declared shape/dtype are
 cross-checked against the kernel .mlir func signature, so a spec that lies about
 the kernel is rejected here rather than silently producing a wrong harness.
 
-v1 scope: matmul / matmul_transpose_b in f64. elementwise and f32/f16 references
-are step 3 (they raise SpecError, never emit a wrong harness).
+v1 scope: matmul / matmul_transpose_b / elementwise in f64. f32/f16 references
+need the host-side fp-tolerance gate (they raise SpecError, never emit a wrong
+harness).
 """
 import os
 import re
@@ -140,6 +141,61 @@ def _gen_matmul(spec, transpose_b):
             "BINDING_ARRAYS": binding_arrays, "CHECK": check, "NBIND": "3"}
 
 
+# elementwise binary op (the linalg.generic body) -> the host-reference C operator.
+_ELEM_OPS = {"arith.addf": "+", "arith.mulf": "*", "arith.subf": "-"}
+
+
+def _mlir_elementwise_op(spec):
+    """The single arith binary op in the linalg.generic body (authoritative)."""
+    text = re.sub(r"//[^\n]*", "", open(spec.mlir).read())
+    found = [op for op in _ELEM_OPS if op in text]
+    if len(found) != 1:
+        raise SpecError(f"[{spec.name}] elementwise: expected exactly one of "
+                        f"{sorted(_ELEM_OPS)} in the kernel body, found {found}")
+    return _ELEM_OPS[found[0]]
+
+
+def _gen_elementwise(spec):
+    if len(spec.bindings) != 3:
+        raise SpecError(f"[{spec.name}] elementwise needs 3 bindings, got {len(spec.bindings)}")
+    M = spec.shape[0]                          # flattened element count (1-D op)
+    shapes = _mlir_arg_shapes(spec)            # cross-check: A,B,C all [M]
+    if len(shapes) < 3 or any(s != [M] for s in shapes[:3]):
+        raise SpecError(f"[{spec.name}] elementwise expects 3 [{M}] {spec.dtype} 1-D operands; "
+                        f".mlir has {shapes}")
+    c_op = _mlir_elementwise_op(spec)
+    # Structured integer inputs A[L]=L+1, B[L]=2L+1: the per-element result is
+    # strictly monotonic in L for +,*,- -> all values DISTINCT, so ANY index
+    # permutation (wrong stride / tile-boundary bug) is caught.
+    py = {"+": lambda a, b: a + b, "*": lambda a, b: a * b, "-": lambda a, b: a - b}[c_op]
+    flat = [py(L + 1, 2 * L + 1) for L in range(M)]
+    if max(abs(v) for v in flat) >= 2 ** 31:
+        raise SpecError(f"[{spec.name}] int32 elementwise reference overflows for M={M}")
+    if len(set(flat)) != M:
+        raise SpecError(f"[{spec.name}] elementwise reference not all-distinct -- "
+                        "inputs miss index permutations")
+    buffer_decls = ("  static iree_alignas(64) elem_t A[MM];\n"
+                    "  static iree_alignas(64) elem_t B[MM];\n"
+                    "  static iree_alignas(64) elem_t C[MM];")
+    input_fill = ("  for (int L = 0; L < MM; L++) {\n"
+                  "    A[L] = (elem_t)(L + 1);\n"
+                  "    B[L] = (elem_t)(2 * L + 1);\n"
+                  "    C[L] = (elem_t)0;\n"
+                  "  }")
+    binding_arrays = ("  void* binding_ptrs[3] = {A, B, C};\n"
+                      "  size_t binding_lengths[3] = {sizeof(A), sizeof(B), sizeof(C)};")
+    check = ("  for (int L = 0; L < MM; L++) {\n"
+             f"    int want = (int)A[L] {c_op} (int)B[L];\n"
+             "    int got = (int)C[L];\n"
+             "    if (got != want) {\n"
+             "      if (first_i < 0) { first_i = L; first_j = 0; first_got = got; first_want = want; }\n"
+             "      errors++;\n"
+             "    }\n"
+             "  }")
+    return {"BUFFER_DECLS": buffer_decls, "INPUT_FILL": input_fill,
+            "BINDING_ARRAYS": binding_arrays, "CHECK": check, "NBIND": "3"}
+
+
 def generate(spec):
     if spec.dtype not in C_TYPE:
         raise SpecError(f"[{spec.name}] harness gen for dtype {spec.dtype}: step 3")
@@ -148,12 +204,16 @@ def generate(spec):
     if spec.op in ("matmul", "matmul_transpose_b"):
         transpose_b = _crosscheck_matmul(spec)
         blocks = _gen_matmul(spec, transpose_b)
+    elif spec.op == "elementwise":
+        blocks = _gen_elementwise(spec)
     else:
         raise SpecError(f"[{spec.name}] harness gen for op {spec.op}: step 3")
 
     M, N, K = spec.shape
     subs = {"NAME": spec.name, "ENTRY": spec.entry, "QUERY": spec.query_symbol,
-            "HEADER": f"{spec.module}.h", "M": str(M), "N": str(N), "K": str(K),
+            "HEADER": f"{spec.module}.h", "M": str(M),
+            "N": str(N if N is not None else 1),   # NN=1 for a 1-D elementwise op
+            "K": str(K if K is not None else 1),   # KK unused; keep the #define valid
             "ELEM": C_TYPE[spec.dtype], **blocks}
     out = open(TEMPLATE).read()
     for k, v in subs.items():
