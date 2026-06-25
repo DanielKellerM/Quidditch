@@ -1,0 +1,23 @@
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Autotuner op-spec scaffolded from tools/autotune/ops/gemm_plain.mlir. REVIEW `module` (the quidditch_module
+# DST -> #include <<module>.h>) -- it is a build choice, not in the .mlir.
+name        = "gemm_plain"
+mlir        = "tools/autotune/ops/gemm_plain.mlir"
+entry       = "gemm_plain"
+module      = "gemm_plain_mod"
+op          = "matmul"
+dtype       = "f64"
+transpose_b = false
+shape       = { M = 16, N = 16, K = 16 }
+bindings    = ["A", "B", "C"]
+
+[knobs]
+l1_tiles             = { type = "triple", choices = [4, 8, 16] }
+dual_buffer          = { type = "bool" }
+l1_tiles_interchange = { type = "perm", choices = [[2, 0, 1]] }
+
+[validation]
+baseline_tag = "8x8x8_dbtrue"
