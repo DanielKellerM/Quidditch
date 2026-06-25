@@ -5,8 +5,10 @@
 """Phase-3 profiler glue: a per-dispatch cycle table -> the Amdahl orchestrator's
 `dispatches` JSON (orchestrate.py plan).
 
-Parses op_type + shape from IREE dispatch names
-(main$async_dispatch_<N>_<op>_<MxNx...>_f<bits>), computes each dispatch's
+Parses op_type + shape from IREE dispatch names. Post-IREE-v3.11.0 the live
+form is main_dispatch_<N>_<op>_<MxNx...>_f<bits> (the pre-migration
+main$async_dispatch_..._matmul_transpose_b_... form is gone; verified via the
+twomm proxy). The regex below matches both. Computes each dispatch's
 percent of total COMPUTE cycles, and emits {dispatches:[{file,op_type,shape,
 cycles,pct_total}]} descending. This is the deterministic, tested conversion the
 orchestrator consumes.
@@ -14,7 +16,8 @@ orchestrator consumes.
 The per-dispatch cycle counts are the INPUT here (a JSON {dispatch_name: cycles}).
 Producing them from a whole-model run is the remaining Phase-3 instrumentation:
 sim the model, run snitch_cluster/util/trace/gen_trace.py for per-region cycles,
-EXCLUDE hart_00000 (the DM core), and group regions by dispatch. That trace
+EXCLUDE hart_00008 (the DM core -- the 9th/last core per cfg/default.json; harts
+0-7 are the compute cores), and group regions by dispatch. That trace
 correlation + the model sim are not in this file; this defines + validates the
 interface they must produce.
 """
@@ -23,7 +26,7 @@ import json
 import re
 import sys
 
-# main$async_dispatch_0_matmul_transpose_b_1x600x600_f64$xdsl_kernel1
+# main_dispatch_0_matmul_16x16x16_f64  (also matches the legacy $async/_transpose_b form)
 DISPATCH_RE = re.compile(r"dispatch_\d+_([a-z_]+?)_(\d+(?:x\d+)+)_f(\d+)")
 
 
