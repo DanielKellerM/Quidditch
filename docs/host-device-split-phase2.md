@@ -427,23 +427,61 @@ IREE module-load knob) or pre-verify offline. Flag for the 2a co-sim.
    symbol; only `quidditch_..._library_query` is global) as harness.c:100 does;
    the kernel's static-inline snRuntime refs resolved via the quidditch_snrt_exports
    shim. lib/ = generated SPLIT output (gitignored).
-3. DONE (investigated) — VM bytecode verification disable for host-VM-on-RTL:
-   `-DIREE_VM_BYTECODE_VERIFICATION_ENABLE=0` (config.h override) compiles out the
-   per-op verifier; add a 1-line `#if` guard around the flatcc
-   `BytecodeModuleDef_verify_as_root` (verifier.c:24-30), then REBUILD the rv64 IREE
-   libs. Compile-time only; safe for the self-produced deploy module (keep ON in CI).
-4. TODO — **dma-core fan-out (functional, before the gemm computes)**: the kernel
-   splits into `compute_core_ptrs` (compute cores) + `dma_core_ptrs` (DM core); both
-   are in the elf (`$xdsl_kernel0/1` + `$dma`). The firmware runs only the compute
-   half — the DISPATCH handler must ALSO run `dma_core_ptrs[ord]` on the DM core
-   concurrently (the dispatch.c/harness model). Extend qcs_replay's table + fan-out
-   to carry + run both halves.
+3. DONE + PROVEN ON RV64 — VM bytecode verification disable: `runtime/host/patches/
+   iree-verify-off.patch` guards the flatcc `BytecodeModuleDef_verify_as_root`
+   (upstream gates only the per-op verifier, not this) + build the rv64 IREE libs
+   with `-DIREE_VM_BYTECODE_VERIFICATION_ENABLE=0`. With it, the rv64 host VM (cluster
+   HAL registered) runs the FULL path under spike — context-create -> invoke
+   gemm_square.gemm64 -> QCS recorded (1 DISPATCH, 3 bindings, == x86) in **~11s**
+   (was >595s, all in the flatcc verify). The host half is now proven on rv64, not
+   just x86. (Repo iree submodule left clean; patch applied at build time.)
+4. DONE (2b5964c) — dma-core fan-out: the firmware runs BOTH halves per dispatch
+   (compute_core_ptrs on compute cores over the grid + dma_core_ptrs once on the DM
+   core), mirroring dispatch.c. Reviewed deadlock-free; rebuilds rv32.
 5. TODO — point freestanding `shared_region.c` at gwaihir HW: `region->base` =
    cluster L2-SPM aperture; `qcs_doorbell_ring` -> cluster `cl_clint_set` (msip) MMIO;
    drop the auto-complete; `qcs_doorbell_wait_completion` polls the real completion/
    status the DM core writes back.
-6. TODO — rebuild rv64 IREE with verification off; co-sim on Questa (host VM on CVA6
-   + the cluster firmware); verify `gemm_square` C == A@B vs a host reference.
+5b. DONE (AOT host validated) — instead of the bytecode interpreter, emit the HOST
+   as IREE **vm-c (EmitC = native compiled C)**: `--output-format=vm-c` +
+   `--iree-quidditch-static-library-output-path` gives an EmitC host module
+   (`<name>_create` -> `iree_vm_native_module_create`, a static C function table) +
+   the SAME separable xDSL kernel `.o`. Built freestanding rv64 + the cluster HAL,
+   it runs under spike: native module created, **context created INSTANTLY (no
+   flatcc/parse/verify/interpreter)**, export resolved. The throughput killer is
+   gone. (The rv64-spike invoke stalls on a spike-only HTIF console `_write` bug in
+   syscalls.c — orthogonal to EmitC, won't apply on Cheshire HTIF; the x86 harness
+   proves the recording: 1 DISPATCH, 3 bindings.) **RTL-ready host = EmitC vm-c host
+   + separable kernel.o.** Deploy-config TODO: add a quidditch_module SPLIT variant
+   emitting the vm-c host lib (linking iree::vm) + the kernel.o (the non-SPLIT vm-c
+   branch already does both in one compile).
+6. IN PROGRESS — the Questa co-sim, EmitC native host. INTEGRATED end-to-end; one
+   precise RTL blocker left.
+   - Stage 1 DONE: EmitC IREE host builds as a Cheshire SW binary
+     (`quidditch_gemm.l2host.elf`, 900KB) against Cheshire crt0/UART/newlib (spike
+     HTIF glue dropped; medany libm/libc stubs kept for reloc-safety;
+     `--allow-multiple-definition` for memcpy/memset). Fills A,B; invokes
+     gemm_square.gemm64; reads C; verifies C==A@B; reports via SCRATCH[2].
+   - Stage 2 DONE: cluster HAL HW-wired. region.base=0x70000000 (L2 SPM, PA=offset).
+     **Caught + fixed a collision**: descriptor at PA0 overlapped the firmware .text
+     (0x70000000-0x7000D6F8) -> moved descriptor to offset 0x10000 (host + firmware,
+     firmware rebuilt). Doorbell writes scratch[1]=entry, scratch[0]=desc PA, then
+     cl_clint_set=0x1FF @0x200211A0 (disasm-verified, == simple_offload); real
+     completion poll.
+   - Stage 3 BLOCKER: design elaborates, both ELFs preload, the CVA6 RESUMES + fetches
+     its entry word — but reads X at entry+4. Root cause: **backdoor-loaded L2 SPM is
+     not coherent with the CVA6 LLC/dcache fetch path** (the Snitch reads L2 SPM
+     directly, so the firmware is fine; simple_offload worked only because its host ran
+     from the 64KiB Cheshire SPM @0x10000000 — too small for the 121KiB IREE host text).
+     Host-placement walls: DRAM@0x80000000 = JTAG bus error; L2 SPM = CVA6 fetch-X via
+     LLC; Cheshire SPM = too small. FIX direction: configure/flush the LLC so the CVA6
+     sees backdoor-written L2 SPM coherently (bootrom LLC-as-SPM config or an axi_llc
+     flush before resume), or a coherent load path. Data IS in SRAM (backdoor write
+     succeeded; first fetch word resolved) — only the cached read path returns X.
+   - Verify-ready: golden C[0,0]=43792, C[255]=1092352 for A(a[i]=i+1)/B(b[i]=2(i+1));
+     jtag_wait_for_eoc reads SCRATCH[2]; l2mem.bin dumps C at PA 0x12000 for cross-check.
+   - Artifacts: /scratch/.../iree-rv64-host/cheshire/ + the rebuilt qcs_replay.elf +
+     a tb_gwaihir_top.sv backdoor-preload edit (scratch only).
 
 ## Status
 
