@@ -92,12 +92,17 @@ def _gen_matmul(spec, transpose_b):
         raise SpecError(f"[{spec.name}] matmul harness needs 3 bindings, got {len(spec.bindings)}")
     M, N, K = spec.shape
     # Inputs are distinct, asymmetric integers; assert the reference discriminates
-    # row/column/transpose permutations and stays in int32 (rv32 has no fcvt.l.d).
+    # row/column/transpose permutations. The reference uses INT32 (exact, simplest)
+    # while the result fits, else an f64-EXACT reference: every core (incl. the DM
+    # core that runs the check) has an FPU and matmul needs only fmul/fadd (NO div),
+    # so f64 raises the exact-compare ceiling from 2^31 to 2^53 -- inputs are exact
+    # integers and every partial sum stays < 2^53, so == is order-independent/exact.
     C = _matmul_reference(M, N, K)
     mx = max(max(r) for r in C)
-    if mx >= 2 ** 31:
-        raise SpecError(f"[{spec.name}] int32 reference overflows (max {mx}) for "
-                        f"M={M} N={N} K={K}; widen the harness reference for this shape")
+    if mx >= 2 ** 53:
+        raise SpecError(f"[{spec.name}] reference exceeds f64-exact (max {mx} >= 2^53) for "
+                        f"M={M} N={N} K={K}; needs a rel+abs tolerance gate (not built)")
+    fp_ref = mx >= 2 ** 31      # past int32 -> use the f64-exact reference + compare
     if len({tuple(r) for r in C}) != M:
         raise SpecError(f"[{spec.name}] reference has duplicate rows -- inputs miss row permutations")
     if len({tuple(C[i][j] for i in range(M)) for j in range(N)}) != N:
@@ -126,17 +131,31 @@ def _gen_matmul(spec, transpose_b):
                   "  for (int idx = 0; idx < MM * NN; idx++) C[idx] = (elem_t)0;")
     binding_arrays = ("  void* binding_ptrs[3] = {A, B, C};\n"
                       "  size_t binding_lengths[3] = {sizeof(A), sizeof(B), sizeof(C)};")
-    check = ("  for (int i = 0; i < MM; i++)\n"
-             "    for (int j = 0; j < NN; j++) {\n"
-             "      int want = 0;\n"
-             "      for (int k = 0; k < KK; k++)\n"
-             f"        want += (int)A[i * KK + k] * (int){b_idx};\n"
-             "      int got = (int)C[i * NN + j];\n"
-             "      if (got != want) {\n"
-             "        if (first_i < 0) { first_i = i; first_j = j; first_got = got; first_want = want; }\n"
-             "        errors++;\n"
-             "      }\n"
-             "    }")
+    if fp_ref:   # f64-exact reference (mul/add only, no div -> runs on the DM core)
+        check = ("  for (int i = 0; i < MM; i++)\n"
+                 "    for (int j = 0; j < NN; j++) {\n"
+                 "      elem_t want = (elem_t)0;\n"
+                 "      for (int k = 0; k < KK; k++)\n"
+                 f"        want += A[i * KK + k] * {b_idx};\n"
+                 "      elem_t got = C[i * NN + j];\n"
+                 "      if (got != want) {\n"
+                 "        if (first_i < 0) { first_i = i; first_j = j;\n"
+                 "          first_got = (int)got; first_want = (int)want; }\n"
+                 "        errors++;\n"
+                 "      }\n"
+                 "    }")
+    else:
+        check = ("  for (int i = 0; i < MM; i++)\n"
+                 "    for (int j = 0; j < NN; j++) {\n"
+                 "      int want = 0;\n"
+                 "      for (int k = 0; k < KK; k++)\n"
+                 f"        want += (int)A[i * KK + k] * (int){b_idx};\n"
+                 "      int got = (int)C[i * NN + j];\n"
+                 "      if (got != want) {\n"
+                 "        if (first_i < 0) { first_i = i; first_j = j; first_got = got; first_want = want; }\n"
+                 "        errors++;\n"
+                 "      }\n"
+                 "    }")
     return {"BUFFER_DECLS": buffer_decls, "INPUT_FILL": input_fill,
             "BINDING_ARRAYS": binding_arrays, "CHECK": check, "NBIND": "3"}
 

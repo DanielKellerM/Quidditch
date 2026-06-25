@@ -38,15 +38,18 @@ def apply(op, dry_run=False):
     best = json.load(open(best_path))
     if not best.get("ok", True):
         sys.exit(f"best_{op}.json is not a correct config -- refusing to apply")
-    cfg = best["config"]                       # [M, N, K, dual_buffer, [interchange]]
-    mt, nt, kt, db = cfg[0], cfg[1], cfg[2], cfg[3]
-    ix = cfg[4] if len(cfg) > 4 else [2, 0, 1]
+    cfg = best["config"]                       # [tiles, dual_buffer, interchange]
+    if not (len(cfg) == 3 and isinstance(cfg[0], list)):
+        sys.exit(f"best_{op}.json config not in the [tiles, dual_buffer, interchange] "
+                 f"form (re-run the sweep): {cfg}")
+    tiles, db, ix = cfg[0], cfg[1], cfg[2]      # N-dim: 3 for matmul, 1 for elementwise
 
     src = open(spec.mlir).read()
-    new = re.sub(r"l1_tiles = \[[0-9, ]+\]", f"l1_tiles = [{mt}, {nt}, {kt}]", src)
+    new = re.sub(r"l1_tiles = \[[0-9, ]+\]",
+                 "l1_tiles = [" + ", ".join(str(t) for t in tiles) + "]", src)
     new = re.sub(r"dual_buffer = (?:true|false)", f"dual_buffer = {db}", new)
     new = re.sub(r"l1_tiles_interchange = \[[0-9, ]+\]",
-                 f"l1_tiles_interchange = [{ix[0]}, {ix[1]}, {ix[2]}]", new)
+                 "l1_tiles_interchange = [" + ", ".join(str(t) for t in ix) + "]", new)
 
     if new == src:
         print(f"{op}: lowering_config already matches best ({best['tag']}, {best['cycles']} cyc)")

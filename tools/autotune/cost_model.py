@@ -55,10 +55,45 @@ them (see module docstring). Treat them as ordering weights, not physics.
 """
 import math
 
-# ---- Snitch cluster constants (sourced in the module docstring) ----
-NCORE = 8          # compute cores
-DMA_BPC = 64.0     # iDMA bytes/cycle (dma_data_width = 512 bit)
-F64 = 8            # bytes per f64
+# ---- Snitch cluster constants: cfg-DERIVED, not hand-copied ----
+# The cluster .cfg (snitch_cluster/cfg/default.json) generates the RTL + the
+# runtime header snitch_cluster_cfg.h. Read the same artifacts so the cost model
+# cannot drift from the hardware the RTL was built for. See CFG_DRIVEN_TARGET.md.
+import os as _os
+import re as _re
+
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
+_CFG_HEADER = _os.path.join(_HERE, "../../snitch_cluster/sw/runtime/impl/snitch_cluster_cfg.h")
+_CFG_JSON = _os.path.join(_HERE, "../../snitch_cluster/cfg/default.json")
+
+
+def _grep_int(path, pattern):
+    try:
+        m = _re.search(pattern, open(path).read())
+        return int(m.group(1)) if m else None
+    except OSError:
+        return None
+
+
+def _ncore_from_cfg(default=8):
+    nr = _grep_int(_CFG_HEADER, r"#define\s+CFG_CLUSTER_NR_CORES\s+(\d+)")
+    dm = _grep_int(_CFG_HEADER, r"#define\s+SNRT_CLUSTER_DM_CORE_NUM\s+(\d+)")
+    return nr - dm if (nr is not None and dm is not None) else default
+
+
+def _dma_bpc_from_cfg(default=64.0):
+    # Prefer the generated header (the artifact the C runtime consumes); it now
+    # emits SNRT_DMA_DATA_WIDTH (the snitch_cluster_cfg.h.tpl add). Fall back to the
+    # cfg's dma_data_width (bits) for an older header. Either way: cfg-derived.
+    bits = _grep_int(_CFG_HEADER, r"#define\s+SNRT_DMA_DATA_WIDTH\s+(\d+)")
+    if bits is None:
+        bits = _grep_int(_CFG_JSON, r"dma_data_width\s*:\s*(\d+)")
+    return bits / 8.0 if bits else default
+
+
+NCORE = _ncore_from_cfg()      # compute cores; default cfg: 9 - 1 = 8
+DMA_BPC = _dma_bpc_from_cfg()  # iDMA bytes/cycle; default cfg: 512 bit / 8 = 64
+F64 = 8                        # bytes per f64
 
 # ---- fitted ordering weights (ranking is robust to +-40% on each) ----
 TILE_SETUP = 180   # per-L1-tile SSR+frep setup (overhead-bound regime: dominant)
