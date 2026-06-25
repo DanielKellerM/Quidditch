@@ -4,6 +4,9 @@ package:
     - "Daniel Keller <dankeller@ethz.ch>"
 
 # HW IP via Bender (gitignored .bender/), not submodules; uv stays for Python.
-# Bender.lock seeded from cheshire's frozen lock: use `bender checkout`, not `update`.
+# Bender.lock seeded from gwaihir's frozen lock: use `bender checkout`, not `update`.
 dependencies:
-  cheshire: { git: "https://github.com/pulp-platform/cheshire.git", version: 0.3.1 }
+  # Phase-2 SoC: GWAIHIR (Cheshire + snitch_cluster + FlooNoC). Its frozen lock seeds
+  # Bender.lock. cheshire + snitch_cluster are satisfied transitively via gwaihir; do
+  # NOT co-mount a separate cheshire/occamy dep tree (they pin clashing shared-IP revs).
+  gwaihir: { git: "https://github.com/pulp-platform/gwaihir.git", rev: 4eac10a36a0ff6868b4b5c2ae3dc51de7b90d8ba }
