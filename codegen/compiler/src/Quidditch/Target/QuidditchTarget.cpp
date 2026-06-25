@@ -45,7 +45,10 @@
 #include "llvm/Target/TargetOptions.h"
 
 #include "llvm/Support/FileUtilities.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Program.h"
+
+#include <optional>
 
 #include "LibraryBuilder.h"
 #include "Passes.h"
@@ -55,6 +58,97 @@ using namespace mlir::iree_compiler;
 using namespace quidditch::Snitch;
 
 namespace {
+
+// Find `#define <name>` in a generated C header, robust to // comments and
+// whitespace: scan LINES (so a commented `// #define ...` is skipped), tolerate any
+// spacing after `#define`/the name, require a word boundary after the name (so NAME
+// is not matched as a prefix of NAMEX), and take the FIRST uncommented match (a
+// commented duplicate cannot shadow a real define). Returns the line remainder after
+// the name (the value, or "" for a bare presence flag), or nullopt if not defined.
+static std::optional<StringRef> cfgDefineBody(StringRef text, StringRef name) {
+  auto isWord = [](char c) {
+    return c == '_' || (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z');
+  };
+  SmallVector<StringRef> lines;
+  text.split(lines, '\n');
+  for (StringRef line : lines) {
+    StringRef s = line.ltrim();
+    if (!s.consume_front("#define"))
+      continue; // not a #define (also skips "// #define ..." -- starts with //)
+    if (s.empty() || isWord(s.front()))
+      continue; // require whitespace after #define (reject "#defineX")
+    s = s.ltrim();
+    if (!s.consume_front(name))
+      continue;
+    if (!s.empty() && isWord(s.front()))
+      continue; // word boundary: reject NAME matched as a prefix of NAMEX
+    return s.ltrim();
+  }
+  return std::nullopt;
+}
+
+// Parse `#define <name> <int>` (decimal/hex) from the header.
+static std::optional<int64_t> cfgHeaderDefine(StringRef text, StringRef name) {
+  std::optional<StringRef> body = cfgDefineBody(text, name);
+  if (!body)
+    return std::nullopt;
+  int64_t v;
+  if (body->consumeInteger(/*Radix=*/0, v)) // consumeInteger returns true on FAILURE
+    return std::nullopt;
+  return v;
+}
+
+// Is `#define <name>` present (a presence flag like SNRT_SUPPORTS_SSR)?
+static bool cfgHeaderDefined(StringRef text, StringRef name) {
+  return cfgDefineBody(text, name).has_value();
+}
+
+// Hardware parameters read from the cfg-generated snitch_cluster_cfg.h (the same
+// artifact the C runtime consumes) so the codegen TARGET matches the RTL the cfg
+// built, instead of baked literals. compute_cores is CONSUMED (the tiling divisor,
+// TensorTile/LowerForall); the rest are PLACEHOLDERS -- read from the cfg + threaded
+// into the target attr, but their consumers are TODO (future work, not forgotten).
+// Coverage table + cfg keys: CFG_DRIVEN_TARGET.md.
+struct ClusterParams {
+  unsigned computeCores = 8;   // CONSUMED (tiling divisor).
+  int64_t tcdmBytes = 0;       // SNRT_TCDM_SIZE (0 = absent).
+                               // TODO(cfg-target): -> l1MemoryBytes, BLOCKED on the
+                               //   100000-vs-112640 DMA-stack overflow (do NOT use
+                               //   the full cfg TCDM).
+  int64_t seqLoops = 0;        // SNRT_NUM_SEQUENCER_LOOPS.
+                               // TODO(cfg-target): enforce in the FREP body-size/
+                               //   nesting check (convert_riscv_scf_for_to_frep).
+  int64_t seqInsns = 0;        // SNRT_NUM_SEQUENCER_INSNS (paired with seqLoops TODO).
+  bool supportsSSR = true;     // SNRT_SUPPORTS_SSR.
+                               // TODO(cfg-target): gate the xDSL SSR pass selection.
+  bool supportsFREP = true;    // SNRT_SUPPORTS_FREP.
+                               // TODO(cfg-target): gate the xDSL FREP pass selection.
+};
+
+static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
+  ClusterParams p;
+  if (headerPath.empty())
+    return p;
+  llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buf =
+      llvm::MemoryBuffer::getFile(headerPath);
+  if (!buf)
+    return p;
+  StringRef text = (*buf)->getBuffer();
+  std::optional<int64_t> nr = cfgHeaderDefine(text, "CFG_CLUSTER_NR_CORES");
+  std::optional<int64_t> dm = cfgHeaderDefine(text, "SNRT_CLUSTER_DM_CORE_NUM");
+  if (nr && dm && *nr > *dm)
+    p.computeCores = static_cast<unsigned>(*nr - *dm);
+  if (std::optional<int64_t> t = cfgHeaderDefine(text, "SNRT_TCDM_SIZE"))
+    p.tcdmBytes = *t;
+  if (std::optional<int64_t> l = cfgHeaderDefine(text, "SNRT_NUM_SEQUENCER_LOOPS"))
+    p.seqLoops = *l;
+  if (std::optional<int64_t> i = cfgHeaderDefine(text, "SNRT_NUM_SEQUENCER_INSNS"))
+    p.seqInsns = *i;
+  p.supportsSSR = cfgHeaderDefined(text, "SNRT_SUPPORTS_SSR");
+  p.supportsFREP = cfgHeaderDefined(text, "SNRT_SUPPORTS_FREP");
+  return p;
+}
 
 class QuidditchTargetDevice final : public IREE::HAL::TargetDevice {
 public:
@@ -81,6 +175,7 @@ struct QuidditchTargetOptions {
   std::string xDSLOptPath;
   std::string xDSLPasses = "arith-add-fastmath,test-lower-linalg-to-snitch";
   std::string configTable;
+  std::string clusterCfgHeader;
   std::string toolChainRoot;
   bool assertCompiled = false;
   // TODO: This should actually be 112640 but DMA stack overflows. Ooopsie!
@@ -117,6 +212,13 @@ struct QuidditchTargetOptions {
                                            "table for ConfigureForSnitch; empty "
                                            "uses the built-in seed. The autotuner "
                                            "upserts tuned tilings here."));
+    binder.opt<std::string>(
+        "iree-quidditch-cluster-cfg-header", clusterCfgHeader,
+        llvm::cl::cat(category),
+        llvm::cl::desc("Path to the cfg-generated snitch_cluster_cfg.h; the "
+                       "codegen compute_cores is derived from it "
+                       "(CFG_CLUSTER_NR_CORES - SNRT_CLUSTER_DM_CORE_NUM) so the "
+                       "tiling divisor matches the RTL. Empty defaults to 8."));
     binder.opt<std::string>(
         "iree-quidditch-toolchain-root", toolChainRoot, llvm::cl::cat(category),
         llvm::cl::desc("Path to the root directory of the Quidditch toolchain "
@@ -167,8 +269,19 @@ public:
                 StringAttr::get(context, "e-m:e-p:32:32-i64:64-n32-S128"));
     list.append("target_triple",
                 StringAttr::get(context, "riscv32-unknown-elf"));
-    list.append("compute_cores",
-                IntegerAttr::get(IntegerType::get(context, 32), 8));
+    // HW params, cfg-derived from the cluster header when the flag is given (so the
+    // codegen target matches the RTL the cfg built), else defaults. INVARIANT: a cfg
+    // param is emitted into the target dict ONLY once it has a CONSUMER. Emitting an
+    // unconsumed attr has no codegen effect -- it only bloats IREE's pretty-printed
+    // target-attr diagnostic string (.rodata) and would perturb the stripped-ELF
+    // canary for nothing. compute_cores is CONSUMED (the tiling divisor,
+    // TensorTile/LowerForall), so it is emitted unconditionally and tracks the cfg.
+    // The other ClusterParams (tcdm_bytes, sequencer_*, supports_*) are read from the
+    // cfg but NOT emitted until their consumers land; each is re-added here together
+    // with its consumer (TODO(cfg-target) on ClusterParams + CFG_DRIVEN_TARGET.md).
+    ClusterParams cp = clusterParamsFromCfgHeader(targetOptions.clusterCfgHeader);
+    IntegerType i32 = IntegerType::get(context, 32);
+    list.append("compute_cores", IntegerAttr::get(i32, cp.computeCores));
     executableTargetAttrs.push_back(IREE::HAL::ExecutableTargetAttr::get(
         context, StringAttr::get(context, "quidditch"),
         StringAttr::get(context, "snitch"), list.getDictionary(context)));

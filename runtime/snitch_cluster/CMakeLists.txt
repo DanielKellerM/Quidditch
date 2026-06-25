@@ -28,6 +28,12 @@ clustergen_render(${header_dir}/snitch_cluster_addrmap.rdl
 clustergen_render(${header_dir}/snitch_cluster_cfg.h
     ${runtime_impl}/snitch_cluster_cfg.h.tpl)
 
+# Expose the cfg-generated cluster header so the codegen target (iree-compile, via
+# quidditch_module) can derive its HW params from the SAME cfg the runtime is built
+# from, instead of baked literals (--iree-quidditch-cluster-cfg-header).
+set(QUIDDITCH_CLUSTER_CFG_HEADER ${header_dir}/snitch_cluster_cfg.h
+    CACHE INTERNAL "cfg-generated snitch_cluster_cfg.h for the Quidditch codegen target")
+
 set(peakrdl_inc -I ${periph_dir} -I ${header_dir})
 
 add_custom_command(OUTPUT ${header_dir}/snitch_cluster_peripheral.h
