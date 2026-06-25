@@ -112,9 +112,12 @@ static bool cfgHeaderDefined(StringRef text, StringRef name) {
 // Coverage table + cfg keys: CFG_DRIVEN_TARGET.md.
 struct ClusterParams {
   unsigned computeCores = 8;   // CONSUMED: tiling divisor (TensorTile/LowerForall).
-  int64_t tcdmBytes = 0;       // SNRT_TCDM_SIZE (0 = absent).
-                               // TODO(cfg-target): -> l1MemoryBytes, BLOCKED on the
-                               //   100000-vs-112640 DMA-stack overflow.
+  int64_t coreNum = 0;         // CFG_CLUSTER_NR_CORES (FULL count incl. the DM core;
+                               //   stacks exist for all of them). CONSUMED with
+                               //   tcdmBytes to derive l1MemoryBytes.
+  int64_t tcdmBytes = 0;       // SNRT_TCDM_SIZE (0 = absent). CONSUMED: derives
+                               //   l1MemoryBytes (tcdm - stacks - margin) in
+                               //   buildTranslationPassPipeline.
   int64_t seqLoops = 0;        // SNRT_NUM_SEQUENCER_LOOPS.
                                // TODO(cfg-target): FREP nesting bound -- no consumer
                                //   yet (>2 nesting is unreachable in the lowering).
@@ -124,6 +127,15 @@ struct ClusterParams {
   bool supportsFREP = true;    // SNRT_SUPPORTS_FREP. CONSUMED (xDSL FREP pass gate).
   bool supportsDivSqrt = true; // SNRT_SUPPORTS_DIVSQRT (Xdiv_sqrt). CONSUMED:
                                //   refuse arith.divf when absent (xDSL).
+  // Cluster L1/TCDM base and AXI zero-memory region, cfg-derived from the new
+  // QUIDDITCH_L1_* defines (snitch_cluster_cfg.h.tpl, themselves derived from the
+  // SystemRDL addrmap fields). Defaults are the upstream occamy/dev-box addrmap so
+  // a cfg-less compile (or a cfg without these defines) keeps targeting 0x10000000.
+  // CONSUMED: l1_base by ConvertSnitchToLLVM (L1MemoryViewOp), l1_zero_mem_* by
+  // ConvertDMAToLLVM (StartZeroMemTransferOp).
+  int64_t l1Base = 0x10000000;
+  int64_t l1ZeroMemBase = 0x10030000;
+  int64_t l1ZeroMemSize = 0x10000;
 };
 
 static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
@@ -137,6 +149,8 @@ static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
   StringRef text = (*buf)->getBuffer();
   std::optional<int64_t> nr = cfgHeaderDefine(text, "CFG_CLUSTER_NR_CORES");
   std::optional<int64_t> dm = cfgHeaderDefine(text, "SNRT_CLUSTER_DM_CORE_NUM");
+  if (nr)
+    p.coreNum = *nr;
   if (nr && dm && *nr > *dm)
     p.computeCores = static_cast<unsigned>(*nr - *dm);
   if (std::optional<int64_t> t = cfgHeaderDefine(text, "SNRT_TCDM_SIZE"))
@@ -148,6 +162,12 @@ static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
   p.supportsSSR = cfgHeaderDefined(text, "SNRT_SUPPORTS_SSR");
   p.supportsFREP = cfgHeaderDefined(text, "SNRT_SUPPORTS_FREP");
   p.supportsDivSqrt = cfgHeaderDefined(text, "SNRT_SUPPORTS_DIVSQRT");
+  if (std::optional<int64_t> b = cfgHeaderDefine(text, "QUIDDITCH_L1_BASE"))
+    p.l1Base = *b;
+  if (std::optional<int64_t> b = cfgHeaderDefine(text, "QUIDDITCH_L1_ZERO_MEM_BASE"))
+    p.l1ZeroMemBase = *b;
+  if (std::optional<int64_t> s = cfgHeaderDefine(text, "QUIDDITCH_L1_ZERO_MEM_SIZE"))
+    p.l1ZeroMemSize = *s;
   return p;
 }
 
@@ -179,8 +199,10 @@ struct QuidditchTargetOptions {
   std::string clusterCfgHeader;
   std::string toolChainRoot;
   bool assertCompiled = false;
-  // TODO: This should actually be 112640 but DMA stack overflows. Ooopsie!
-  unsigned l1MemoryBytes = 100000;
+  // 0 = auto-derive from the cfg (TCDM - per-core stacks - margin) in
+  // buildTranslationPassPipeline. A nonzero --iree-quidditch-l1-memory-bytes
+  // overrides it (e.g. for sim sweeps); no cfg header -> a conservative fallback.
+  unsigned l1MemoryBytes = 0;
 
   void bindOptions(OptionsBinder &binder) {
     LLVMInitializeRISCVTarget();
@@ -283,6 +305,15 @@ public:
     ClusterParams cp = clusterParamsFromCfgHeader(targetOptions.clusterCfgHeader);
     IntegerType i32 = IntegerType::get(context, 32);
     list.append("compute_cores", IntegerAttr::get(i32, cp.computeCores));
+    // Cluster L1/TCDM base + zero-memory region. CONSUMED by the LLVM lowering
+    // (ConvertSnitchToLLVM L1MemoryViewOp; ConvertDMAToLLVM StartZeroMemTransferOp).
+    // Emitted unconditionally like compute_cores: cp holds the cfg-derived values
+    // when --iree-quidditch-cluster-cfg-header is given, else the occamy defaults,
+    // so the addrmap tracks the cfg and a cfg-less compile keeps targeting occamy.
+    IntegerType i64 = IntegerType::get(context, 64);
+    list.append("l1_base", IntegerAttr::get(i64, cp.l1Base));
+    list.append("l1_zero_mem_base", IntegerAttr::get(i64, cp.l1ZeroMemBase));
+    list.append("l1_zero_mem_size", IntegerAttr::get(i32, cp.l1ZeroMemSize));
     // CONSUMED in buildTranslationPassPipeline (supports_ssr/frep gate the xDSL
     // SSR/FREP passes; sequencer_insns bounds the FREP body size). Emitted only with
     // the cfg flag; absent (no flag) reads as supported / the xDSL default.
@@ -388,8 +419,25 @@ public:
         // #hal.descriptor_type memory space through the stack.
         .addPass(createEraseHALDescriptorTypeFromMemRefPass)
         .addPass([&] {
+          // l1MemoryBytes: 0 = auto-derive from the cfg; nonzero = CLI override.
+          unsigned l1Bytes = targetOptions.l1MemoryBytes;
+          if (l1Bytes == 0) {
+            ClusterParams cp =
+                clusterParamsFromCfgHeader(targetOptions.clusterCfgHeader);
+            if (cp.tcdmBytes && cp.coreNum)
+              // Match the runtime's own usable-heap computation (alloc_v2.h
+              // snrt_l1_init): TCDM minus one stack per core (ALL cores incl. the
+              // DM core) minus a 128-byte margin. The stack log2-size is 11 in the
+              // quidditch runtime (quidditch_cluster_defs.h #undefs the cfg
+              // header's 10) -- it MUST be 11 here; the cfg header's 10 would
+              // overshoot by ~9KB and smash the stacks. 131072-2048*9-128 = 112512.
+              l1Bytes = static_cast<unsigned>(
+                  cp.tcdmBytes - (int64_t(1) << 11) * cp.coreNum - 128);
+            else
+              l1Bytes = 100000; // no cfg header: the conservative legacy default
+          }
           return quidditch::Snitch::createLowerL1AllocationsPass(
-              {targetOptions.l1MemoryBytes, targetOptions.assertCompiled});
+              {l1Bytes, targetOptions.assertCompiled});
         })
         .addPass(quidditch::createReluToMaxPass)
         .addPass(createCanonicalizerPass)

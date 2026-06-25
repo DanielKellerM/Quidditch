@@ -8,10 +8,13 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
+
 #include "Quidditch/Dialect/DMA/IR/DMAOps.h"
 #include "Quidditch/Dialect/SnitchDMA/IR/SnitchDMAOps.h"
 
 using namespace mlir;
+using namespace mlir::iree_compiler;
 using namespace quidditch;
 using namespace quidditch::dma;
 
@@ -125,21 +128,30 @@ struct StartTransferOpLowering : ConvertOpToLLVMPattern<StartTransferOp> {
   }
 };
 
-// TODO: These should not be hardcoded.
-constexpr unsigned zeroMemSize = 0x10000;
-constexpr unsigned zeroMemAddress = 0x10030000;
-
+// Cluster AXI zero-memory region, cfg-derived via the l1_zero_mem_base /
+// l1_zero_mem_size target attrs (resolved in populateDMAToLLVMConversionPatterns
+// from the module's ExecutableTargetAttr, mirroring how compute_cores is threaded
+// in QuidditchTarget.cpp). Defaults to the occamy/dev-box values (0x10030000 /
+// 0x10000) when the attr is absent. gwaihir's region is 0x20030000 / 0xF000
+// (GW_CLUSTER_ZEROMEM_BASE/SIZE). With the wrong base the kernel's zero-fill DMA
+// targets a dead region on gwaihir -> the iDMA never drains -> the DM core wedges
+// -> the host polls completion forever, hence this must track the cfg addrmap.
 struct StartContiguousZeroMemTransferOpOpLowering
     : ConvertOpToLLVMPattern<StartZeroMemTransferOp> {
 
   LLVM::LLVMFuncOp dmaStart1DFunc;
   LLVM::LLVMFuncOp dmaStart2DFunc;
+  unsigned zeroMemAddress;
+  unsigned zeroMemSize;
 
   StartContiguousZeroMemTransferOpOpLowering(LLVM::LLVMFuncOp dmaStart1DFunc,
                                              LLVM::LLVMFuncOp dmaStart2DFunc,
+                                             unsigned zeroMemAddress,
+                                             unsigned zeroMemSize,
                                              const LLVMTypeConverter &converter)
       : ConvertOpToLLVMPattern(converter, /*benefit=*/2),
-        dmaStart1DFunc(dmaStart1DFunc), dmaStart2DFunc(dmaStart2DFunc) {}
+        dmaStart1DFunc(dmaStart1DFunc), dmaStart2DFunc(dmaStart2DFunc),
+        zeroMemAddress(zeroMemAddress), zeroMemSize(zeroMemSize) {}
 
   LogicalResult
   matchAndRewrite(StartZeroMemTransferOp op, OpAdaptor adaptor,
@@ -375,6 +387,19 @@ void quidditch::populateDMAToLLVMConversionPatterns(
                   CombineTokensOpLowering>(typeConverter);
   patterns.insert<StartTransferOpLowering>(dmaStart1D, dmaStart2D,
                                            typeConverter);
+  // Resolve the cfg-derived zero-memory region from the module's target attr;
+  // default to the occamy/dev-box values when absent (no cfg header). QuidditchTarget
+  // emits these unconditionally, so a normally-compiled module always carries them.
+  unsigned zeroMemAddress = 0x10030000;
+  unsigned zeroMemSize = 0x10000;
+  if (auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(moduleOp))
+    if (DictionaryAttr cfg = targetAttr.getConfiguration()) {
+      if (auto attr = cfg.getAs<IntegerAttr>("l1_zero_mem_base"))
+        zeroMemAddress = static_cast<unsigned>(attr.getInt());
+      if (auto attr = cfg.getAs<IntegerAttr>("l1_zero_mem_size"))
+        zeroMemSize = static_cast<unsigned>(attr.getInt());
+    }
+
   patterns.insert<StartContiguousZeroMemTransferOpOpLowering>(
-      dmaStart1D, dmaStart2D, typeConverter);
+      dmaStart1D, dmaStart2D, zeroMemAddress, zeroMemSize, typeConverter);
 }
