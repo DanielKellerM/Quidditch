@@ -8,15 +8,24 @@
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Transforms/DialectConversion.h"
 
+#include "iree/compiler/Dialect/HAL/IR/HALTypes.h"
+
 #include "Quidditch/Dialect/Snitch/IR/QuidditchSnitchDialect.h"
 #include "Quidditch/Dialect/Snitch/IR/QuidditchSnitchOps.h"
 
 using namespace mlir;
+using namespace mlir::iree_compiler;
 using namespace quidditch::Snitch;
 
 namespace {
 struct L1MemoryViewOpLowering : ConvertOpToLLVMPattern<L1MemoryViewOp> {
-  using ConvertOpToLLVMPattern<L1MemoryViewOp>::ConvertOpToLLVMPattern;
+  // Cluster L1/TCDM base, cfg-derived via the `l1_base` target attr (resolved in
+  // populateSnitchToLLVMConversionPatterns from the module's ExecutableTargetAttr,
+  // defaulting to the occamy/dev-box 0x10000000 when the attr is absent).
+  int64_t l1Base;
+
+  L1MemoryViewOpLowering(int64_t l1Base, const LLVMTypeConverter &converter)
+      : ConvertOpToLLVMPattern(converter), l1Base(l1Base) {}
 
   LogicalResult
   matchAndRewrite(L1MemoryViewOp op, OpAdaptor adaptor,
@@ -29,9 +38,16 @@ struct L1MemoryViewOpLowering : ConvertOpToLLVMPattern<L1MemoryViewOp> {
                                    adaptor.getOperands(), rewriter, sizes,
                                    strides, size);
 
-    // TODO: This is horribly hardcoded when it shouldn't be.
+    // Cluster L1/TCDM base, cfg-derived (l1_base target attr). gwaihir places the
+    // Snitch cluster TCDM at 0x20000000 (cluster_base_addr) -- NOT the upstream
+    // snitch_cluster / occamy default 0x10000000 (which on gwaihir is the Cheshire
+    // internal SPM). The kernel's $dma half DMAs A/B/C from L2-SPM into this L1 view
+    // and the compute halves read it back; a wrong base makes the iDMA target the
+    // Cheshire SPM and the DM core wedges in snrt_dma_wait. The base now tracks the
+    // cfg addrmap (SNITCH_CLUSTER_RAW_ADDRMAP_CLUSTER_TCDM_BASE_ADDR) via l1_base.
     Value l1Address = rewriter.create<LLVM::ConstantOp>(
-        op->getLoc(), rewriter.getI32IntegerAttr(0x10000000));
+        op->getLoc(),
+        rewriter.getI32IntegerAttr(static_cast<int32_t>(l1Base)));
     Value allocatedPtr = rewriter.create<LLVM::IntToPtrOp>(
         op->getLoc(), rewriter.getType<LLVM::LLVMPointerType>(), l1Address);
 
@@ -188,8 +204,17 @@ void quidditch::populateSnitchToLLVMConversionPatterns(
       LLVM::LLVMFunctionType::get(i32, ArrayRef<Type>{}));
   computeCoreIndex->setAttr("hal.import.bitcode", builder.getUnitAttr());
 
-  patterns.insert<L1MemoryViewOpLowering, BarrierOpLowering,
-                  MicrokernelFenceOpLowering>(typeConverter);
+  // Resolve the cfg-derived cluster L1/TCDM base from the module's target attr;
+  // default to the occamy/dev-box base when absent (no cfg header). QuidditchTarget
+  // emits l1_base unconditionally, so a normally-compiled module always carries it.
+  int64_t l1Base = 0x10000000;
+  if (auto targetAttr = IREE::HAL::ExecutableTargetAttr::lookup(moduleOp))
+    if (DictionaryAttr cfg = targetAttr.getConfiguration())
+      if (auto attr = cfg.getAs<IntegerAttr>("l1_base"))
+        l1Base = attr.getInt();
+
+  patterns.insert<BarrierOpLowering, MicrokernelFenceOpLowering>(typeConverter);
+  patterns.insert<L1MemoryViewOpLowering>(l1Base, typeConverter);
   patterns.insert<ComputeCoreIndexOpLowering>(computeCoreIndex, typeConverter);
   patterns.insert<CallMicrokernelOpLowering>(SymbolTable(moduleOp),
                                              typeConverter);

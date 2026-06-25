@@ -31,6 +31,7 @@ iree_cc_library(
         "ConvertSnitchToLLVM.cpp"
         DEPS
         Quidditch::Dialect::Snitch::IR::QuidditchSnitchDialect
+        iree::compiler::Dialect::HAL::IR
         MLIRAnalysis
         MLIRIR
         MLIRLLVMCommonConversion
@@ -47,6 +48,7 @@ iree_cc_library(
         DEPS
         Quidditch::Dialect::DMA::IR::DMADialect
         Quidditch::Dialect::SnitchDMA::IR::SnitchDMADialect
+        iree::compiler::Dialect::HAL::IR
         MLIRAnalysis
         MLIRIR
         MLIRLLVMCommonConversion

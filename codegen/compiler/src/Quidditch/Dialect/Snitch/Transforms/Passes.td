@@ -50,7 +50,10 @@ def LowerL1AllocationsPass : InterfacePass<"quidditch-lower-l1-allocations",
   }];
 
   let options = [
-    Option<"l1MemoryBytes", "l1-memory-bytes", "unsigned", "112640", "">,
+    // Standalone default only; the Quidditch target derives this from the cfg
+    // (TCDM - per-core stacks - margin = 112512 for the default cluster) and
+    // always passes it explicitly. 112640 (TCDM - stacks, no margin) overflows.
+    Option<"l1MemoryBytes", "l1-memory-bytes", "unsigned", "112512", "">,
     Option<"assertCompiled", "assert-compiled", "bool", "false",
            "If true, errors if the kernel does not fit into L1 meory."
            "Otherwise, removes the kernel from the output and emits a warning "
