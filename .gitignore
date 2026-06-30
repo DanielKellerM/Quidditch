@@ -32,3 +32,6 @@ trace_hart_*.dasm
 
 # working / design docs -- kept on disk, not tracked
 docs/*.md
+
+# local symlink to the (per-machine) /scratch gwaihir gen tree -- see README
+/.gwaihir
