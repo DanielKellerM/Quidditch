@@ -60,7 +60,9 @@ add_custom_command(OUTPUT ${header_dir}/snitch_cluster_addrmap.h
 add_custom_command(OUTPUT ${header_dir}/snitch_cluster_raw_addrmap.h
     COMMAND ${PEAKRDL_PATH} raw-header ${header_dir}/snitch_cluster_addrmap.rdl
             -o ${header_dir}/snitch_cluster_raw_addrmap.h
-            --base_name snitch_cluster_raw_addrmap --format c ${peakrdl_inc}
+            --base_name snitch_cluster_addrmap --format c ${peakrdl_inc}
+    # peakrdl-1.5.0 derives the guard from --base_name; restore the committed RAW_ADDRMAP_H guard so it stays distinct from the c-header's SNITCH_CLUSTER_ADDRMAP_H
+    COMMAND sed -i "s/SNITCH_CLUSTER_ADDRMAP_H/SNITCH_CLUSTER_RAW_ADDRMAP_H/g" ${header_dir}/snitch_cluster_raw_addrmap.h
     DEPENDS ${header_dir}/snitch_cluster_addrmap.rdl ${header_dir}/snitch_cluster.rdl
     VERBATIM)
 
@@ -87,11 +89,12 @@ add_library(snRuntime
     rtl/src/syscalls.c
 )
 target_link_libraries(snRuntime PUBLIC snRuntimeInterface)
+# generated cluster_gen first so its cfg.h/addrmap shadow the committed (stale/occamy-base) copies in impl/
 target_include_directories(snRuntime
     PRIVATE
+    ${header_dir}
     ${snRuntimeSrc}/sw/runtime/src
     ${snRuntimeSrc}/sw/runtime/impl
-    ${header_dir}
 )
 add_dependencies(snRuntime snRuntimeConfig)
 target_link_options(snRuntime INTERFACE -Tbase.ld)
