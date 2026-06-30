@@ -29,3 +29,6 @@ trace_hart_*.dasm
 /runtime/host/hal/cluster/test_cluster_device
 /runtime/host/firmware/test_cluster_replay
 /runtime/host/app/phase1_gemm
+
+# working / design docs -- kept on disk, not tracked
+docs/*.md
