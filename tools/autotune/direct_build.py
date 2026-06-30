@@ -26,7 +26,9 @@ import subprocess
 import tempfile
 
 ROOT = "/home/dankeller/Projects/Quidditch"
-BUILD = f"{ROOT}/build-rt"
+# QUIDDITCH_BUILD_RT selects the runtime tree (cfg header + archives + includes all
+# derive from it); set it to build-rt-gwaihir to retarget the gwaihir cluster.
+BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
 
 # --- absolute toolchain paths (from `ninja -t commands gemm_harness`) ---
 IREE_COMPILE = "/scratch/dankeller/snitch-compiler/iree-p6-build/tools/iree-compile"

@@ -46,9 +46,11 @@ from spec import load_spec, SpecError
 
 ROOT = "/home/dankeller/Projects/Quidditch"
 NINJA = f"{ROOT}/venv/bin/ninja"          # 1.13 (the non-dot venv has it)
-BUILD = f"{ROOT}/build-rt"
+BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
 SIM = f"{ROOT}/snitch_cluster/target/sim"
-VLT = f"{SIM}/build/bin/snitch_cluster.vlt"
+# QUIDDITCH_VLT selects the sim binary; point it at the gwaihir cluster .vlt to
+# measure gwaihir-cluster cycles (see tools/autotune/build_gwaihir_cluster_sim.sh).
+VLT = os.environ.get("QUIDDITCH_VLT", f"{SIM}/build/bin/snitch_cluster.vlt")
 LLVM_STRIP = "/usr/scratch2/vulcano/colluca/tools/riscv32-snitch-llvm-almalinux8-15.0.0-snitch-0.5.0/bin/llvm-strip"
 CCACHE = "/scratch/dankeller/snitch-compiler/.ccache"
 WORK = "/scratch/dankeller/snitch-compiler/autotune-work"
