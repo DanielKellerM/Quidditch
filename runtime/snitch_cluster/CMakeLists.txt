@@ -5,7 +5,10 @@ find_program(PEAKRDL_PATH NAMES peakrdl REQUIRED)
 
 set(snRuntimeSrc ${SNITCH_CLUSTER_SOURCE_DIR})
 set(header_dir ${CMAKE_CURRENT_BINARY_DIR}/cluster_gen)
-set(config_file ${snRuntimeSrc}/cfg/default.json)
+# cluster cfg JSON -> snitch_cluster_cfg.h; override to retarget a SoC (e.g. .gwaihir/cfg/snitch_cluster.json)
+set(QUIDDITCH_CLUSTER_CFG ${snRuntimeSrc}/cfg/default.json
+    CACHE FILEPATH "Snitch cluster cfg JSON driving snitch_cluster_cfg.h (default = occamy-lineage)")
+set(config_file ${QUIDDITCH_CLUSTER_CFG})
 set(clustergen ${snRuntimeSrc}/util/clustergen/clustergen.py)
 set(clustergen_src ${snRuntimeSrc}/util/clustergen/cluster.py)
 set(periph_dir ${snRuntimeSrc}/hw/snitch_cluster/src/snitch_cluster_peripheral)
