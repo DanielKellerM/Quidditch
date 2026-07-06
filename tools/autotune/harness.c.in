@@ -45,6 +45,10 @@ int main(void) {
   // The 8 compute cores park in the worker loop; the DM core drives below.
   if (!snrt_is_dm_core()) return quidditch_dispatch_enter_worker_loop();
 
+  // line-buffer stdout: 1 printf = 1 tohost write, else the gwaihir fesvr htif-poll re-drains fragments
+  static char _obuf[512];
+  setvbuf(stdout, _obuf, _IOLBF, sizeof _obuf);
+
   // ---- DM core only ----
 @@INPUT_FILL@@
 

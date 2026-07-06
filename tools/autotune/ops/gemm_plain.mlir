@@ -5,6 +5,9 @@ builtin.module @gemm_plain {
     // indexing_maps, since A=B=C=16x16 shapes are transpose-ambiguous).
     func.func @gemm_plain(%arg0: tensor<16x16xf64>, %arg1: tensor<16x16xf64>) -> tensor<16x16xf64> {
       %init = tensor.empty() : tensor<16x16xf64>
+      // matmul accumulates into outs, so the accumulator must start at 0
+      %zero = arith.constant 0.000000e+00 : f64
+      %filled = linalg.fill ins(%zero : f64) outs(%init : tensor<16x16xf64>) -> tensor<16x16xf64>
       %out = linalg.matmul
         indexing_maps = [
             affine_map<(d0, d1, d2) -> (d0, d2)>,
@@ -19,7 +22,7 @@ builtin.module @gemm_plain {
             >
         }
         ins(%arg0, %arg1 : tensor<16x16xf64>, tensor<16x16xf64>)
-        outs(%init : tensor<16x16xf64>) -> tensor<16x16xf64>
+        outs(%filled : tensor<16x16xf64>) -> tensor<16x16xf64>
       func.return %out : tensor<16x16xf64>
     }
 }
