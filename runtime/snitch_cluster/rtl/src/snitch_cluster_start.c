@@ -4,6 +4,7 @@
 
 #define SNRT_INIT_TLS
 #define SNRT_INIT_BSS
+#define SNRT_INIT_CLS  // set _cls_ptr; snrt_exit's reduction derefs snrt_cls()->reduction (null otherwise)
 #define SNRT_CRT0_PRE_BARRIER
 #define SNRT_INVOKE_MAIN
 #define SNRT_CRT0_POST_BARRIER

@@ -6,6 +6,7 @@
 #define SNRT_INIT_FP_REGS
 #define SNRT_INIT_GP
 #define SNRT_INIT_CORE_INFO
+#define SNRT_INIT_CLS  // reserve the CLS below TCDM-top so the stack doesn't overlap it (matches the .c crt0)
 #define SNRT_INIT_STACK
 #define SNRT_INIT_TLS
 #define SNRT_CRT0_PARK
