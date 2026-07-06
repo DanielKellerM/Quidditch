@@ -18,6 +18,7 @@
 *stacktrace*
 .rtlbinary
 transcript
+modelsim.ini
 dma_trace_*.log
 trace_hart_*.dasm
 
