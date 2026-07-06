@@ -91,6 +91,23 @@ static bool isInitializedByFill(Value v) {
 void PromoteOperandsToL1::runOnOperation() {
   // Copy all tensors used as operands to compute ops into L1 memory.
   getOperation()->walk([&](TilingInterface computeOp) {
+    // A linalg.fill fully overwrites its outs, so it must never read that outs in
+    // from external memory. After workgroup tiling the fill's outs is a slice of
+    // the output binding (the per-workgroup C block); copying it in reads
+    // uninitialized memory (X on the 4-state co-sim) even though the fill
+    // overwrites it. Redirect the fill to a fresh tensor.empty (as in the untiled
+    // case) so the promotion below is a bare L1 alloc, not an external copy-in.
+    if (auto fillOp = dyn_cast<linalg::FillOp>(computeOp.getOperation())) {
+      OpOperand *outs = fillOp.getDpsInitOperand(0);
+      auto ty = dyn_cast<RankedTensorType>(outs->get().getType());
+      if (ty && ty.hasStaticShape() &&
+          !isa_and_nonnull<tensor::EmptyOp>(outs->get().getDefiningOp())) {
+        OpBuilder b(fillOp);
+        outs->set(b.create<tensor::EmptyOp>(fillOp.getLoc(), ty.getShape(),
+                                            ty.getElementType()));
+      }
+    }
+
     // Note: This can create redundant copies that must be cleaned up by CSE.
     SmallVector<OpOperand *> nonL1Uses;
     auto dpsOp =
