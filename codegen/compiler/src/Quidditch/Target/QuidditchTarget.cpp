@@ -123,6 +123,8 @@ struct ClusterParams {
                                //   yet (>2 nesting is unreachable in the lowering).
   int64_t seqInsns = 0;        // SNRT_NUM_SEQUENCER_INSNS.
                                // CONSUMED: bounds the xDSL FREP body size.
+  int64_t fp64Latency = 0;     // CFG_LAT_COMP_FP64 (FPU FP64 pipeline depth, 0=absent).
+                               // CONSUMED: xDSL memref-stream-interleave unroll factor.
   bool supportsSSR = true;     // SNRT_SUPPORTS_SSR. CONSUMED (xDSL SSR pass gate).
   bool supportsFREP = true;    // SNRT_SUPPORTS_FREP. CONSUMED (xDSL FREP pass gate).
   bool supportsDivSqrt = true; // SNRT_SUPPORTS_DIVSQRT (Xdiv_sqrt). CONSUMED:
@@ -159,6 +161,8 @@ static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
     p.seqLoops = *l;
   if (std::optional<int64_t> i = cfgHeaderDefine(text, "SNRT_NUM_SEQUENCER_INSNS"))
     p.seqInsns = *i;
+  if (std::optional<int64_t> f = cfgHeaderDefine(text, "CFG_LAT_COMP_FP64"))
+    p.fp64Latency = *f;
   p.supportsSSR = cfgHeaderDefined(text, "SNRT_SUPPORTS_SSR");
   p.supportsFREP = cfgHeaderDefined(text, "SNRT_SUPPORTS_FREP");
   p.supportsDivSqrt = cfgHeaderDefined(text, "SNRT_SUPPORTS_DIVSQRT");
@@ -323,6 +327,8 @@ public:
       list.append("supports_div_sqrt", BoolAttr::get(context, cp.supportsDivSqrt));
       if (cp.seqInsns)
         list.append("sequencer_insns", IntegerAttr::get(i32, cp.seqInsns));
+      if (cp.fp64Latency)
+        list.append("fp64_pipeline_depth", IntegerAttr::get(i32, cp.fp64Latency));
     }
     executableTargetAttrs.push_back(IREE::HAL::ExecutableTargetAttr::get(
         context, StringAttr::get(context, "quidditch"),
@@ -476,6 +482,12 @@ public:
               cfg ? cfg.getAs<IntegerAttr>("sequencer_insns") : IntegerAttr())
         if (si.getInt() != 32)
           opts.push_back("sequencer_insns=" + std::to_string(si.getInt()));
+      // FPU FP64 pipeline depth -> the interleave unroll heuristic (factor < 2*depth);
+      // override the xDSL default (4) only for a non-default cfg.
+      if (IntegerAttr fl =
+              cfg ? cfg.getAs<IntegerAttr>("fp64_pipeline_depth") : IntegerAttr())
+        if (fl.getInt() != 4)
+          opts.push_back("fp64_pipeline_depth=" + std::to_string(fl.getInt()));
       if (!opts.empty()) {
         std::string braces = "{";
         for (size_t i = 0; i < opts.size(); ++i) {
