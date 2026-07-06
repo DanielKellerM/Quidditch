@@ -90,6 +90,24 @@ def LowerForallOpPass : Pass<"quidditch-lower-forall-op"> {
   ];
 }
 
+def ResolveDmaSpecializationForallOpPass
+  : Pass<"quidditch-resolve-dma-specialization-forall-op", "mlir::ModuleOp"> {
+  let description = [{
+    Resolve the workgroup-mapped `scf.forall` left in `$dma` specialization
+    companion funcs to `hal.interface.workgroup.id`/`count` + delinearize,
+    identical to the resolution ReconcileTranslationInfo applies to the export
+    root (but with no `workgroup_count_hint`, whose count the root owns).
+    ReconcileTranslationInfo misses the companion because it is reached via the
+    `dma_specialization` attribute rather than the call graph.
+  }];
+  let dependentDialects = [
+    "mlir::affine::AffineDialect",
+    "mlir::arith::ArithDialect",
+    "mlir::scf::SCFDialect",
+    "mlir::iree_compiler::IREE::HAL::HALDialect",
+  ];
+}
+
 def PipelineCopyComputePass : Pass<"quidditch-pipeline-copy-compute"> {
   let dependentDialects = [
     "quidditch::Snitch::QuidditchSnitchDialect",

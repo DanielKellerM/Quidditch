@@ -11,6 +11,7 @@
 #include "iree/compiler/Dialect/LinalgExt/Transforms/Passes.h"
 #include "mlir/Conversion/ComplexToStandard/ComplexToStandard.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Dialect/Affine/Transforms/Passes.h"
 #include "mlir/Dialect/Arith/Transforms/Passes.h"
 #include "mlir/Dialect/ArmNeon/ArmNeonDialect.h"
 #include "mlir/Dialect/ArmSME/IR/ArmSME.h"
@@ -533,23 +534,45 @@ public:
         .addPass(createCanonicalizerPass)
         .addPass(createCSEPass);
 
-    modulePassManager.addPass(quidditch::createConvertToLLVMPass());
-    modulePassManager.addPass(createReconcileUnrealizedCastsPass());
-    // We rely on MLIR symbol visibility being correct after this point and
-    // need to mirror the LLVM linkage that was assigned during conversion.
-    modulePassManager.addPass(createLLVMCPUSynchronizeSymbolVisibilityPass());
-
-    modulePassManager.addPass(createCanonicalizerPass());
-    modulePassManager.addPass(createCSEPass());
-    modulePassManager.addNestedPass<LLVM::LLVMFuncOp>(
-        createAddFastMathFlagsPass());
-
-    // The forall-based workgroup distribution leaves the export op's
-    // 'workgroup_count' region as an abstract 'workgroup_count_from_slice';
-    // resolve it to concrete i32 counts (mirrors the LLVMCPU/VMVX variant
-    // pipeline) so the host module's command_buffer.dispatch import is satisfied.
+    // Resolve the #iree_codegen.workgroup_mapping scf.forall to
+    // hal.interface.workgroup.id/count (+ emit the workgroup_count_hint) and
+    // materialize the export's abstract 'workgroup_count_from_slice' region to
+    // concrete i32 counts. Must run BEFORE ConvertToLLVM (mirrors the
+    // LLVMCPU/LLVMGPU variant pipeline): otherwise the workgroup forall survives
+    // into ConvertToLLVM, whose SCFToControlFlow shreds its body into multiple
+    // blocks while scf.forall has no LLVM lowering ('expects 0 or 1 blocks').
+    // The pair is a matched producer/consumer (Reconcile emits the count hint
+    // that ResolveWorkgroupCountHints folds into the export's count region) --
+    // keep them adjacent and in this order. Variant-scoped, so they run on
+    // 'passManager' between the two ModuleOp nests.
     passManager.addPass(createReconcileTranslationInfoPass());
     passManager.addPass(createResolveWorkgroupCountHintsPass());
+
+    OpPassManager &llvmModulePassManager = passManager.nest<ModuleOp>();
+    // Reconcile above resolved the workgroup forall only in the export-root +
+    // call-graph funcs; the $dma specialization companion (reached by attribute,
+    // not a call) still holds its copy. Resolve it before ConvertToLLVM.
+    llvmModulePassManager.addPass(
+        quidditch::Snitch::createResolveDmaSpecializationForallOpPass());
+    // The workgroup-forall resolution (above + Reconcile) emits
+    // affine.delinearize_index + floor/ceil-div arith that run after the first
+    // nest's affine/index/arith lowering and that ConvertToLLVM cannot legalize;
+    // expand them to basic arith here before ConvertToLLVM.
+    FunctionLikeNest(llvmModulePassManager)
+        .addPass(mlir::affine::createAffineExpandIndexOpsPass)
+        .addPass(arith::createArithExpandOpsPass)
+        .addPass(createCanonicalizerPass)
+        .addPass(createCSEPass);
+    llvmModulePassManager.addPass(quidditch::createConvertToLLVMPass());
+    llvmModulePassManager.addPass(createReconcileUnrealizedCastsPass());
+    // We rely on MLIR symbol visibility being correct after this point and
+    // need to mirror the LLVM linkage that was assigned during conversion.
+    llvmModulePassManager.addPass(createLLVMCPUSynchronizeSymbolVisibilityPass());
+
+    llvmModulePassManager.addPass(createCanonicalizerPass());
+    llvmModulePassManager.addPass(createCSEPass());
+    llvmModulePassManager.addNestedPass<LLVM::LLVMFuncOp>(
+        createAddFastMathFlagsPass());
 
     passManager.addPass(quidditch::createDisableQuidditchVariantPass());
   }

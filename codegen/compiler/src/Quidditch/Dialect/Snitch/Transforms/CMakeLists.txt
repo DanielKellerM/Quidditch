@@ -20,6 +20,7 @@ iree_cc_library(
         "LowerPipelineOp.cpp"
         "PipelineCopyCompute.cpp"
         "PromoteToL1.cpp"
+        "ResolveDmaSpecializationForallOp.cpp"
         "SpecializeDMACode.cpp"
         DEPS
         ::PassesIncGen
@@ -27,7 +28,11 @@ iree_cc_library(
         Quidditch::Dialect::Snitch::IR::QuidditchSnitchDialect
         MLIRIR
         MLIRAffineDialect
+        MLIRArithDialect
         MLIRLinalgDialect
         MLIRBufferizationDialect
+        MLIRSCFDialect
         iree::compiler::Dialect::HAL::IR
+        iree::compiler::Codegen::Dialect::Codegen::IR::IREECodegenDialect
+        iree::compiler::Codegen::Transforms
 )

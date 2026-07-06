@@ -43,6 +43,7 @@ defvar TileInterchangeList = TileSizeList;
 def QuidditchSnitch_LoweringConfigAttr : QuidditchSnitch_Attr<"LoweringConfig",
   [DeclareAttrInterfaceMethods<IREECodegen_LoweringConfigAttrInterface, [
     "getWorkgroupTileSizes",
+    "hasWorkgroupTilingLevel",
   ]>]> {
   let mnemonic = "lowering_config";
 
