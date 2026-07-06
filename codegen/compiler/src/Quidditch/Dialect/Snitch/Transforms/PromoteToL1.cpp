@@ -6,9 +6,12 @@
 #include "Quidditch/Dialect/Snitch/IR/QuidditchSnitchDialect.h"
 #include "Quidditch/Dialect/Snitch/IR/QuidditchSnitchOps.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/UB/IR/UBOps.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/TilingInterface.h"
 
 namespace quidditch::Snitch {
@@ -54,14 +57,54 @@ using namespace mlir;
 using namespace quidditch::Snitch;
 using namespace quidditch::dma;
 
+// A DPS init/accumulator value produced (transitively) by a linalg.fill is fully
+// overwritten by that fill, so it must NOT be copied in from its external
+// (out-of-L1) output binding: that would read the uninitialized output into L1
+// and turn C = A@B into C = C_external + A@B (garbage / X on 4-state RTL, and a
+// dependence on device-memory init). Such an accumulator must get a fresh,
+// fill-initialized L1 tile instead. Walk through tiling (extract_slice) and
+// scf.for iter_args back to the fill.
+static bool isInitializedByFill(Value v) {
+  while (v) {
+    if (auto bbArg = dyn_cast<BlockArgument>(v)) {
+      auto forOp =
+          dyn_cast_or_null<scf::ForOp>(bbArg.getOwner()->getParentOp());
+      if (!forOp || bbArg.getArgNumber() == 0)
+        return false;
+      v = forOp.getInitArgs()[bbArg.getArgNumber() - 1];
+      continue;
+    }
+    Operation *def = v.getDefiningOp();
+    if (!def)
+      return false;
+    if (isa<linalg::FillOp>(def))
+      return true;
+    if (auto sliceOp = dyn_cast<tensor::ExtractSliceOp>(def)) {
+      v = sliceOp.getSource();
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
 void PromoteOperandsToL1::runOnOperation() {
   // Copy all tensors used as operands to compute ops into L1 memory.
   getOperation()->walk([&](TilingInterface computeOp) {
     // Note: This can create redundant copies that must be cleaned up by CSE.
     SmallVector<OpOperand *> nonL1Uses;
-    for (OpOperand &operand : computeOp->getOpOperands())
-      if (isa<RankedTensorType>(operand.get().getType()))
-        nonL1Uses.push_back(&operand);
+    auto dpsOp =
+        dyn_cast<DestinationStyleOpInterface>(computeOp.getOperation());
+    for (OpOperand &operand : computeOp->getOpOperands()) {
+      if (!isa<RankedTensorType>(operand.get().getType()))
+        continue;
+      // Skip a fill-initialized DPS init operand: copying it in would read the
+      // uninitialized external output binding into L1 (see isInitializedByFill).
+      if (dpsOp && dpsOp.isDpsInit(&operand) &&
+          isInitializedByFill(operand.get()))
+        continue;
+      nonL1Uses.push_back(&operand);
+    }
 
     auto builder = OpBuilder(computeOp);
     for (OpOperand *use : nonL1Uses) {
