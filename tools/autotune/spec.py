@@ -75,7 +75,9 @@ def _check_mlir_scope(name, mlir):
     text = re.sub(r"//[^\n]*", "", raw)          # strip comments: prose mentions ops too
     if re.search(r"tensor<[^>]*\?", text):
         _reject(name, "dynamic tensor shape (v1 is static-shape only)")
-    payload = [o for o in re.findall(r"\blinalg\.\w+", text) if o != "linalg.yield"]
+    # linalg.fill fuses into the matmul's ordinal-0 dispatch -- not a separate dispatch
+    payload = [o for o in re.findall(r"\blinalg\.\w+", text)
+               if o not in ("linalg.yield", "linalg.fill")]
     if len(payload) > 1:
         _reject(name, f"multi-dispatch ({len(payload)} linalg ops {payload}); "
                       "v1 drives ordinal 0 only -- single-dispatch kernels only")
