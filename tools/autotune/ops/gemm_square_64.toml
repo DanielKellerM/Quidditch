@@ -1,0 +1,17 @@
+name        = "gemm_square_64"
+mlir        = "runtime/samples/gemm_square/gemm_square_64.mlir"
+entry       = "gemm64"
+module      = "gemm_mod"
+op          = "matmul_transpose_b"
+dtype       = "f64"
+transpose_b = true
+shape       = { M = 64, N = 64, K = 64 }
+bindings    = ["A", "B", "C"]
+
+[knobs]
+l1_tiles             = { type = "triple", choices = [64] }
+dual_buffer          = { type = "bool" }
+l1_tiles_interchange = { type = "perm", choices = [[2, 0, 1]] }
+
+[validation]
+baseline_tag = "64x64x64_dbfalse"
