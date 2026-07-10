@@ -37,6 +37,9 @@ void snrt_dma_wait_all(void);
 // Index of the calling compute core within its cluster.
 uint32_t snrt_cluster_core_idx(void);
 
+// Number of compute cores in the cluster.
+uint32_t snrt_cluster_compute_core_num(void);
+
 // Cluster hardware barrier: returns once every core in the cluster has arrived.
 void snrt_cluster_hw_barrier(void);
 
