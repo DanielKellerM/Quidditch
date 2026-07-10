@@ -331,9 +331,7 @@ static iree_status_t quidditch_command_buffer_copy_buffer(
     iree_hal_command_buffer_t* base_command_buffer,
     iree_hal_buffer_ref_t source_ref, iree_hal_buffer_ref_t target_ref,
     iree_hal_copy_flags_t flags) {
-  // §21 Phase-4(B): iDMA the copy instead of scalar iree_hal_buffer_map_copy.
-  // Heap-allocator buffers are mappable host memory, so map gives direct pointers
-  // and the iDMA does the host->host (L3->L3) move off the scalar core.
+  // iDMA the host->host copy off the scalar core (buffers are mappable host memory).
   iree_hal_buffer_mapping_t src_map, dst_map;
   IREE_RETURN_IF_ERROR(iree_hal_buffer_map_range(
       source_ref.buffer, IREE_HAL_MAPPING_MODE_SCOPED,
@@ -369,8 +367,6 @@ static iree_status_t quidditch_command_buffer_collective(
 //===----------------------------------------------------------------------===//
 // iree_hal_command_buffer_dispatch
 //===----------------------------------------------------------------------===//
-
-#include <team_decls.h>
 
 static iree_status_t quidditch_command_buffer_dispatch(
     iree_hal_command_buffer_t* base_command_buffer,

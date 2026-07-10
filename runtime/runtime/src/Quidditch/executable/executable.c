@@ -73,6 +73,14 @@ quidditch_executable_get_attrs(quidditch_executable_t* executable) {
   return quidditch_executable_get_exports(executable)->attrs;
 }
 
+// The DMA-core half of an export (the fork's second dispatch array); NULL for an
+// llvm-cpu executable or an export with no DMA half.
+static iree_hal_executable_dispatch_v0_t quidditch_executable_dma_core_ptr(
+    quidditch_executable_t* executable, iree_host_size_t ordinal) {
+  if (executable->is_llvm_cpu_executable) return NULL;
+  return executable->library.quidditch_v0->exports.dma_core_ptrs[ordinal];
+}
+
 iree_status_t quidditch_executable_create(
     const iree_hal_executable_params_t* executable_params,
     const iree_hal_executable_library_header_t** library_header,
@@ -85,6 +93,14 @@ iree_status_t quidditch_executable_create(
   IREE_ASSERT_ARGUMENT(out_executable);
   *out_executable = NULL;
   IREE_TRACE_ZONE_BEGIN(z0);
+
+  if ((*library_header)->version != IREE_HAL_EXECUTABLE_LIBRARY_VERSION_0_6) {
+    IREE_TRACE_ZONE_END(z0);
+    return iree_make_status(IREE_STATUS_INCOMPATIBLE,
+                            "executable library version %u, expected %u",
+                            (*library_header)->version,
+                            IREE_HAL_EXECUTABLE_LIBRARY_VERSION_0_6);
+  }
 
   quidditch_executable_t* executable = NULL;
   iree_host_size_t total_size =
@@ -176,6 +192,7 @@ iree_status_t quidditch_executable_issue_dispatch_inline(
       quidditch_executable_get_exports(executable);
 
   if (IREE_UNLIKELY(ordinal >= exports->count)) {
+    IREE_TRACE_ZONE_END(z0);
     return iree_make_status(IREE_STATUS_INVALID_ARGUMENT,
                             "entry point ordinal out of bounds");
   }
@@ -184,13 +201,10 @@ iree_status_t quidditch_executable_issue_dispatch_inline(
   quidditch_dispatch_set_kernel(kernel, &executable->environment,
                                 dispatch_state);
 
-  bool compute_cores_are_workgroups = false;
-  if (executable->is_llvm_cpu_executable ||
-      !((quidditch_executable_export_table_v0_t*)exports)
-           ->dma_core_ptrs[ordinal])
-    compute_cores_are_workgroups = true;
+  iree_hal_executable_dispatch_v0_t dma_core_function =
+      quidditch_executable_dma_core_ptr(executable, ordinal);
+  bool compute_cores_are_workgroups = !dma_core_function;
 
-  read_csr(mcycle);
   if (compute_cores_are_workgroups) {
     // LLVM distributes workgroups to compute cores.
     for (uint32_t z = 0; z < workgroup_count_z; ++z) {
@@ -207,11 +221,7 @@ iree_status_t quidditch_executable_issue_dispatch_inline(
 
     quidditch_dispatch_execute_workgroups();
   } else {
-    // Snitch distributes workgroups to clusters.
-    // I.e., one workgroup runs on one cluster.
-    iree_hal_executable_dispatch_v0_t const dmaCoreFunction =
-        ((quidditch_executable_export_table_v0_t*)exports)
-            ->dma_core_ptrs[ordinal];
+    // Snitch runs one workgroup per cluster.
     for (uint32_t z = 0; z < workgroup_count_z; ++z) {
       workgroup_state.workgroup_id_z = z;
       for (uint32_t y = 0; y < workgroup_count_y; ++y) {
@@ -221,8 +231,8 @@ iree_status_t quidditch_executable_issue_dispatch_inline(
 
           quidditch_dispatch_queue_subgroups(&workgroup_state);
 
-          dmaCoreFunction(&executable->environment, dispatch_state,
-                          &workgroup_state);
+          dma_core_function(&executable->environment, dispatch_state,
+                            &workgroup_state);
 
           quidditch_dispatch_wait_for_workgroup();
         }
@@ -230,11 +240,9 @@ iree_status_t quidditch_executable_issue_dispatch_inline(
     }
   }
 
-  read_csr(mcycle);
-
-  if (quidditch_dispatch_errors_occurred())
-    return iree_make_status(IREE_STATUS_INTERNAL);
-
   IREE_TRACE_ZONE_END(z0);
+  if (quidditch_dispatch_errors_occurred())
+    return iree_make_status(IREE_STATUS_INTERNAL,
+                            "dispatch reported errors during workgroup execution");
   return iree_ok_status();
 }
