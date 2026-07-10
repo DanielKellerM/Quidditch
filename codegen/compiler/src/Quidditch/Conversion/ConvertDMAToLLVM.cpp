@@ -346,7 +346,7 @@ struct StatOpLowering : ConvertOpToLLVMPattern<SnitchDMA::StatOp> {
                   ConversionPatternRewriter &rewriter) const override {
     // dmstati $0, 0 (read the calling core's DMA status).
     std::string statAsm =
-        llvm::formatv(".insn r 0x{0:x}, {1}, {2}, $0, zero, zero\n",
+        llvm::formatv(".insn r 0x{0:x-}, {1}, {2}, $0, zero, zero\n",
                       quidditch::kSnitchDmaOpcode, quidditch::kSnitchDmaStatFunct3,
                       quidditch::kSnitchDmaStatFunct7)
             .str();

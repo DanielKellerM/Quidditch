@@ -73,7 +73,7 @@ struct BarrierOpLowering : ConvertOpToLLVMPattern<BarrierOp> {
     // Effectively clobbers all memory by being synchronization point
     // (kind of like atomics).
     std::string barrierAsm =
-        llvm::formatv("csrr x0, 0x{0:X}", quidditch::kSnitchClusterHwBarrierCsr)
+        llvm::formatv("csrr x0, 0x{0:X-}", quidditch::kSnitchClusterHwBarrierCsr)
             .str();
     rewriter.replaceOpWithNewOp<LLVM::InlineAsmOp>(
         op, /*res=*/TypeRange(),
