@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "Quidditch/executable/executable.h"
+#include "Quidditch/quidditch_snrt_abi.h"
 #include "iree/base/api.h"
 #include "iree/base/internal/cpu.h"
 #include "iree/base/internal/fpu_state.h"
@@ -325,12 +326,6 @@ static iree_status_t quidditch_command_buffer_update_buffer(
 //===----------------------------------------------------------------------===//
 // iree_hal_command_buffer_copy_buffer
 //===----------------------------------------------------------------------===//
-
-// snRuntime iDMA (internal API — not in snRuntime/api/; symbols in libsnRuntime via
-// the extern-inline in src/dma.c). Phase-4(B) §21: offload HAL buffer copies from
-// scalar memcpy (iree_hal_buffer_map_copy) to the iDMA.
-extern uint32_t snrt_dma_start_1d(void* dst, const void* src, size_t size);
-extern void snrt_dma_wait_all(void);
 
 static iree_status_t quidditch_command_buffer_copy_buffer(
     iree_hal_command_buffer_t* base_command_buffer,
