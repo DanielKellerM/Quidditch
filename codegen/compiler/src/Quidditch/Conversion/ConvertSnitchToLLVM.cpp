@@ -1,5 +1,7 @@
 #include "ConvertSnitchToLLVM.h"
+#include "SnitchISA.h"
 
+#include "llvm/Support/FormatVariadic.h"
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -70,9 +72,12 @@ struct BarrierOpLowering : ConvertOpToLLVMPattern<BarrierOp> {
                   ConversionPatternRewriter &rewriter) const override {
     // Effectively clobbers all memory by being synchronization point
     // (kind of like atomics).
+    std::string barrierAsm =
+        llvm::formatv("csrr x0, 0x{0:X}", quidditch::kSnitchClusterHwBarrierCsr)
+            .str();
     rewriter.replaceOpWithNewOp<LLVM::InlineAsmOp>(
         op, /*res=*/TypeRange(),
-        /*operands=*/ValueRange(), "csrr x0, 0x7C2",
+        /*operands=*/ValueRange(), barrierAsm,
         /*constraints=*/"~{memory}",
         /*has_side_effects=*/true, /*is_align_stack=*/false,
         /*tail_call_kind=*/LLVM::TailCallKind::None,
