@@ -61,6 +61,20 @@ typedef struct quidditch_executable_export_table_v0_t {
   const iree_hal_executable_dispatch_v0_t* dma_core_ptrs;
 } quidditch_executable_export_table_v0_t;
 
+// Pin the fork struct-of-arrays layout so a field inserted before dma_core_ptrs
+// fails the build instead of silently redirecting the DMA half. These MUST match
+// the firmware's copy verbatim (runtime/host/firmware/gwaihir/qcs_kernel_abi.h);
+// the two are the same ABI compiled for the rv64 host and the rv32 firmware.
+static_assert(offsetof(quidditch_executable_export_table_v0_t, compute_core_ptrs)
+                  == sizeof(void*),
+              "compute_core_ptrs must immediately follow count");
+static_assert(offsetof(quidditch_executable_export_table_v0_t, dma_core_ptrs)
+                  == offsetof(quidditch_executable_export_table_v0_t, stage_locations)
+                         + sizeof(void*),
+              "dma_core_ptrs must be the last struct-of-arrays slot");
+static_assert(sizeof(quidditch_executable_export_table_v0_t) == 11 * sizeof(void*),
+              "fork export table = count slot + 10 pointer slots");
+
 // Structure used for v0 library interfaces.
 // The entire structure is designed to be read-only and able to live embedded in
 // the binary .rdata section.
