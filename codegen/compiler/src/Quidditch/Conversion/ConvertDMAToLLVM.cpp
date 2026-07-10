@@ -1,5 +1,7 @@
 #include "ConvertDMAToLLVM.h"
+#include "SnitchISA.h"
 
+#include "llvm/Support/FormatVariadic.h"
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
 #include "mlir/Conversion/LLVMCommon/Pattern.h"
 #include "mlir/Conversion/LLVMCommon/TypeConverter.h"
@@ -136,7 +138,7 @@ struct StartTransferOpLowering : ConvertOpToLLVMPattern<StartTransferOp> {
 // (GW_CLUSTER_ZEROMEM_BASE/SIZE). With the wrong base the kernel's zero-fill DMA
 // targets a dead region on gwaihir -> the iDMA never drains -> the DM core wedges
 // -> the host polls completion forever, hence this must track the cfg addrmap.
-struct StartContiguousZeroMemTransferOpOpLowering
+struct StartContiguousZeroMemTransferOpLowering
     : ConvertOpToLLVMPattern<StartZeroMemTransferOp> {
 
   LLVM::LLVMFuncOp dmaStart1DFunc;
@@ -144,7 +146,7 @@ struct StartContiguousZeroMemTransferOpOpLowering
   unsigned zeroMemAddress;
   unsigned zeroMemSize;
 
-  StartContiguousZeroMemTransferOpOpLowering(LLVM::LLVMFuncOp dmaStart1DFunc,
+  StartContiguousZeroMemTransferOpLowering(LLVM::LLVMFuncOp dmaStart1DFunc,
                                              LLVM::LLVMFuncOp dmaStart2DFunc,
                                              unsigned zeroMemAddress,
                                              unsigned zeroMemSize,
@@ -213,7 +215,7 @@ struct StartContiguousZeroMemTransferOpOpLowering
   }
 };
 
-struct StartZeroMemTransferOpOpLowering
+struct StartZeroMemTransferOpLowering
     : ConvertOpToLLVMPattern<StartZeroMemTransferOp> {
 
   using ConvertOpToLLVMPattern<StartZeroMemTransferOp>::ConvertOpToLLVMPattern;
@@ -342,13 +344,15 @@ struct StatOpLowering : ConvertOpToLLVMPattern<SnitchDMA::StatOp> {
   LogicalResult
   matchAndRewrite(SnitchDMA::StatOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    // dmstati $0, 0 (read the calling core's DMA status).
+    std::string statAsm =
+        llvm::formatv(".insn r 0x{0:x}, {1}, {2}, $0, zero, zero\n",
+                      quidditch::kSnitchDmaOpcode, quidditch::kSnitchDmaStatFunct3,
+                      quidditch::kSnitchDmaStatFunct7)
+            .str();
     rewriter.replaceOpWithNewOp<LLVM::InlineAsmOp>(
         op, /*res=*/rewriter.getI32Type(),
-        /*operands=*/ValueRange(),
-        // dmstati $0, 0
-        // opcode6=0x2b, func3=0, func7=0b100, rd=$0, rs1=zero,
-        // rs2=imm5(0)
-        ".insn r 0x2b, 0, 0b100, $0, zero, zero\n",
+        /*operands=*/ValueRange(), statAsm,
         /*constraints=*/"=r",
         /*has_side_effects=*/true, /*is_align_stack=*/false,
         /*tail_call_kind=*/LLVM::TailCallKind::None,
@@ -383,7 +387,7 @@ void quidditch::populateDMAToLLVMConversionPatterns(
   dmaStart2D->setAttr("hal.import.bitcode", builder.getUnitAttr());
 
   patterns.insert<CompletedTokenOpLowering, WaitForTransferOpLowering,
-                  StartZeroMemTransferOpOpLowering, StatOpLowering,
+                  StartZeroMemTransferOpLowering, StatOpLowering,
                   CombineTokensOpLowering>(typeConverter);
   patterns.insert<StartTransferOpLowering>(dmaStart1D, dmaStart2D,
                                            typeConverter);
@@ -400,6 +404,6 @@ void quidditch::populateDMAToLLVMConversionPatterns(
         zeroMemSize = static_cast<unsigned>(attr.getInt());
     }
 
-  patterns.insert<StartContiguousZeroMemTransferOpOpLowering>(
+  patterns.insert<StartContiguousZeroMemTransferOpLowering>(
       dmaStart1D, dmaStart2D, zeroMemAddress, zeroMemSize, typeConverter);
 }
