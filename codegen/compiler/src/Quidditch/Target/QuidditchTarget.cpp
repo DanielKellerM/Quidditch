@@ -119,9 +119,6 @@ struct ClusterParams {
   int64_t tcdmBytes = 0;       // SNRT_TCDM_SIZE (0 = absent). CONSUMED: derives
                                //   l1MemoryBytes (tcdm - stacks - margin) in
                                //   buildTranslationPassPipeline.
-  int64_t seqLoops = 0;        // SNRT_NUM_SEQUENCER_LOOPS.
-                               // TODO(cfg-target): FREP nesting bound -- no consumer
-                               //   yet (>2 nesting is unreachable in the lowering).
   int64_t seqInsns = 0;        // SNRT_NUM_SEQUENCER_INSNS.
                                // CONSUMED: bounds the xDSL FREP body size.
   int64_t fp64Latency = 0;     // CFG_LAT_COMP_FP64 (FPU FP64 pipeline depth, 0=absent).
@@ -158,8 +155,6 @@ static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
     p.computeCores = static_cast<unsigned>(*nr - *dm);
   if (std::optional<int64_t> t = cfgHeaderDefine(text, "SNRT_TCDM_SIZE"))
     p.tcdmBytes = *t;
-  if (std::optional<int64_t> l = cfgHeaderDefine(text, "SNRT_NUM_SEQUENCER_LOOPS"))
-    p.seqLoops = *l;
   if (std::optional<int64_t> i = cfgHeaderDefine(text, "SNRT_NUM_SEQUENCER_INSNS"))
     p.seqInsns = *i;
   if (std::optional<int64_t> f = cfgHeaderDefine(text, "CFG_LAT_COMP_FP64"))
@@ -617,13 +612,26 @@ public:
 
       auto &objectFile = objectFiles.emplace_back(
           IREE::HAL::Artifact::createTemporary("xdsl-out", "o"));
+      SmallString<64> stderrFile;
+      if (llvm::sys::fs::createTemporaryFile("pulp-as-diag", "log", stderrFile))
+        return failure();
+      llvm::FileRemover stderrFileRemove(stderrFile);
+      std::optional<llvm::StringRef> redirects[3] = {
+          /*stdin=*/std::nullopt, /*stdout=*/std::nullopt,
+          /*stderr=*/stderrFile.str()};
       int ret = llvm::sys::ExecuteAndWait(
           targetOptions.toolChainRoot + "/bin/pulp-as",
           {targetOptions.toolChainRoot + "/bin/pulp-as", "--filetype=obj",
            "--target-abi=ilp32d", stdinFile.str(), "-o", objectFile.path,
-           "--mcpu=snitch", "-g"});
-      if (ret != 0)
-        return failure();
+           "--mcpu=snitch", "-g"},
+          std::nullopt, redirects);
+      if (ret != 0) {
+        InFlightDiagnostic diag = module.emitError() << "pulp-as failed";
+        if (llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
+                llvm::MemoryBuffer::getFile(stderrFile, /*IsText=*/true))
+          diag.attachNote() << "stderr:\n" << buffer.get()->getBuffer();
+        return diag;
+      }
     }
     return objectFiles;
   }
@@ -803,7 +811,7 @@ public:
     std::unique_ptr<llvm::TargetMachine> machine(
         llvmTarget->createTargetMachine(
             llvm::Triple("riscv32-unknown-unknown-elf"),
-            "generic-rv32" /* cpu e.g k8 */, "+m,+f,+d,+zfh", {},
+            "generic-rv32", "+m,+f,+d,+zfh", {},
             llvm::Reloc::Model::PIC_, {}, llvm::CodeGenOptLevel::Aggressive,
             /*JIT=*/false));
 
