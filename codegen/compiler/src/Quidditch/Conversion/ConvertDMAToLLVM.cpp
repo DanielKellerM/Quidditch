@@ -1,5 +1,6 @@
 #include "ConvertDMAToLLVM.h"
 #include "SnitchISA.h"
+#include "SnrtImport.h"
 
 #include "llvm/Support/FormatVariadic.h"
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
@@ -374,17 +375,14 @@ void quidditch::populateDMAToLLVMConversionPatterns(
   auto ptrType = builder.getType<LLVM::LLVMPointerType>();
   IntegerType i32 = builder.getI32Type();
   IntegerType sizeT = i32;
-  auto dmaStart1D = builder.create<LLVM::LLVMFuncOp>(
-      builder.getUnknownLoc(), "snrt_dma_start_1d",
+  auto dmaStart1D = quidditch::declareSnrtImport(
+      builder, "snrt_dma_start_1d",
       LLVM::LLVMFunctionType::get(i32,
                                   ArrayRef<Type>{ptrType, ptrType, sizeT}));
-  dmaStart1D->setAttr("hal.import.bitcode", builder.getUnitAttr());
-
-  auto dmaStart2D = builder.create<LLVM::LLVMFuncOp>(
-      builder.getUnknownLoc(), "snrt_dma_start_2d",
+  auto dmaStart2D = quidditch::declareSnrtImport(
+      builder, "snrt_dma_start_2d",
       LLVM::LLVMFunctionType::get(
           i32, ArrayRef<Type>{ptrType, ptrType, sizeT, sizeT, sizeT, sizeT}));
-  dmaStart2D->setAttr("hal.import.bitcode", builder.getUnitAttr());
 
   patterns.insert<CompletedTokenOpLowering, WaitForTransferOpLowering,
                   StartZeroMemTransferOpLowering, StatOpLowering,
