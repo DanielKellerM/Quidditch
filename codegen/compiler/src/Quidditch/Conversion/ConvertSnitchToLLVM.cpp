@@ -1,5 +1,6 @@
 #include "ConvertSnitchToLLVM.h"
 #include "SnitchISA.h"
+#include "SnrtImport.h"
 
 #include "llvm/Support/FormatVariadic.h"
 #include "mlir/Conversion/LLVMCommon/MemRefBuilder.h"
@@ -204,10 +205,9 @@ void quidditch::populateSnitchToLLVMConversionPatterns(
 
   auto builder = OpBuilder::atBlockEnd(moduleOp.getBody());
   IntegerType i32 = builder.getI32Type();
-  auto computeCoreIndex = builder.create<LLVM::LLVMFuncOp>(
-      builder.getUnknownLoc(), "snrt_cluster_core_idx",
+  auto computeCoreIndex = quidditch::declareSnrtImport(
+      builder, "snrt_cluster_core_idx",
       LLVM::LLVMFunctionType::get(i32, ArrayRef<Type>{}));
-  computeCoreIndex->setAttr("hal.import.bitcode", builder.getUnitAttr());
 
   // Resolve the cfg-derived cluster L1/TCDM base from the module's target attr;
   // default to the occamy/dev-box base when absent (no cfg header). QuidditchTarget
