@@ -66,7 +66,8 @@ int main(void) {
       (const quidditch_executable_library_v0_t*)header;
 
   const iree_host_size_t ordinal = 0;
-  iree_hal_executable_dispatch_attrs_v0_t attrs = lib->exports.attrs[ordinal];
+  iree_hal_executable_dispatch_attrs_v0_t attrs =
+      ((const iree_hal_executable_dispatch_attrs_v0_t*)lib->exports.attrs)[ordinal];
   size_t local_memory_size = (size_t)attrs.local_memory_pages * 4096;
   if (local_memory_size > sizeof(g_local_memory)) {
     printf("HARNESS ERROR: local_memory_pages=%u exceeds scratch\n",
