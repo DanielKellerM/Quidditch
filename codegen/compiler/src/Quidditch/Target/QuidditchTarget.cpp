@@ -60,6 +60,9 @@ using namespace quidditch::Snitch;
 
 namespace {
 
+// One Snitch target-triple spelling shared by the emitted attr and the TargetMachine.
+constexpr llvm::StringLiteral kSnitchTargetTriple = "riscv32-unknown-unknown-elf";
+
 // Find `#define <name>` in a generated C header, robust to // comments and
 // whitespace: scan LINES (so a commented `// #define ...` is skipped), tolerate any
 // spacing after `#define`/the name, require a word boundary after the name (so NAME
@@ -295,7 +298,7 @@ public:
     list.append("data_layout",
                 StringAttr::get(context, "e-m:e-p:32:32-i64:64-n32-S128"));
     list.append("target_triple",
-                StringAttr::get(context, "riscv32-unknown-elf"));
+                StringAttr::get(context, kSnitchTargetTriple));
     // HW params, cfg-derived from the cluster header when the flag is given (so the
     // codegen target matches the RTL the cfg built), else defaults. INVARIANT: a cfg
     // param is emitted into the target dict ONLY once it has a CONSUMER. Emitting an
@@ -605,9 +608,9 @@ public:
       SmallString<64> stdinFile;
       int stdinFd;
       if (llvm::sys::fs::createTemporaryFile("xdsl-in", "S", stdinFd,
-                                             stdinFile)) {
-        return failure();
-      }
+                                             stdinFile))
+        return module.emitError()
+               << "failed to create a temporary file for the xDSL assembly";
       llvm::FileRemover stdinFileRemove(stdinFile);
       {
         llvm::raw_fd_ostream ss(stdinFd, /*shouldClose=*/true);
@@ -618,7 +621,8 @@ public:
           IREE::HAL::Artifact::createTemporary("xdsl-out", "o"));
       SmallString<64> stderrFile;
       if (llvm::sys::fs::createTemporaryFile("pulp-as-diag", "log", stderrFile))
-        return failure();
+        return module.emitError()
+               << "failed to create a temporary file for pulp-as diagnostics";
       llvm::FileRemover stderrFileRemove(stderrFile);
       std::optional<llvm::StringRef> redirects[3] = {
           /*stdin=*/std::nullopt, /*stdout=*/std::nullopt,
@@ -807,15 +811,15 @@ public:
         std::move(*objectFilesOrFailure);
 
     std::string errorMessage;
-    auto llvmTarget = llvm::TargetRegistry::lookupTarget(
-        "riscv32-unknown-unknown-elf", errorMessage);
+    auto llvmTarget =
+        llvm::TargetRegistry::lookupTarget(kSnitchTargetTriple, errorMessage);
     if (!llvmTarget)
       return variantOp.emitError(errorMessage);
 
     std::unique_ptr<llvm::TargetMachine> machine(
         llvmTarget->createTargetMachine(
-            llvm::Triple("riscv32-unknown-unknown-elf"),
-            "generic-rv32", "+m,+f,+d,+zfh", {},
+            llvm::Triple(kSnitchTargetTriple), "generic-rv32", "+m,+f,+d,+zfh",
+            {},
             llvm::Reloc::Model::PIC_, {}, llvm::CodeGenOptLevel::Aggressive,
             /*JIT=*/false));
 
@@ -847,10 +851,24 @@ public:
     auto linkedObject = IREE::HAL::Artifact::createTemporary(libraryName, "o");
     arguments.push_back("-o");
     arguments.push_back(linkedObject.path);
+    SmallString<64> stderrFile;
+    if (llvm::sys::fs::createTemporaryFile("ld-lld-diag", "log", stderrFile))
+      return variantOp.emitError()
+             << "failed to create a temporary file for ld.lld diagnostics";
+    llvm::FileRemover stderrFileRemove(stderrFile);
+    std::optional<llvm::StringRef> redirects[3] = {
+        /*stdin=*/std::nullopt, /*stdout=*/std::nullopt,
+        /*stderr=*/stderrFile.str()};
     int ret = llvm::sys::ExecuteAndWait(
-        targetOptions.toolChainRoot + "/bin/ld.lld", arguments);
-    if (ret != 0)
-      return failure();
+        targetOptions.toolChainRoot + "/bin/ld.lld", arguments, std::nullopt,
+        redirects);
+    if (ret != 0) {
+      InFlightDiagnostic diag = variantOp.emitError() << "ld.lld failed";
+      if (llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer =
+              llvm::MemoryBuffer::getFile(stderrFile, /*IsText=*/true))
+        diag.attachNote() << "stderr:\n" << buffer.get()->getBuffer();
+      return diag;
+    }
 
     if (!IREE::HAL::outputStaticLibrary(
             "quidditch_" + libraryName,
