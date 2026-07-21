@@ -71,13 +71,18 @@ def _parse(cfg):
     return tuple(c)
 
 
+def _nested(c):
+    # agent_loop threads the flat (t0,t1,t2,db,ix); sweep takes the nested (tiles,db,ix).
+    return ((c[0], c[1], c[2]), c[3], c[4])
+
+
 def propose(op, cfg_str, passes=None):
     spec = load_spec(op)
     c = _parse(cfg_str)
-    tag = sweep.tag_of(c) + ("" if not passes else f"+p{zlib.crc32(passes.encode()) % 10000:04d}")
+    tag = sweep.tag_of(_nested(c), spec) + ("" if not passes else f"+p{zlib.crc32(passes.encode()) % 10000:04d}")
     s = _load(op)
     est = round(cost_model([c[0], c[1], c[2]], c[3], spec.shape))
-    r = sweep.pipeline(c, spec, _harness_obj(spec), xdsl_passes=passes)
+    r = sweep.pipeline(_nested(c), spec, _harness_obj(spec), xdsl_passes=passes)
     legal, correct, cycles = r.get("legal"), r.get("ok", False), r.get("cycles")
     kept, note = False, ""
     if not legal:
