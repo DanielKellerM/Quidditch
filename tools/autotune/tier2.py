@@ -94,7 +94,6 @@ def check(op, config, xdsl_passes=None):
     if got_count != M * N:
         sys.exit(f"Tier-2 FAIL: hash over {got_count} elements, expected {M * N}")
     expect = fnv32(b"".join(struct.pack("<d", v) for v in matmul_reference(spec)))
-    tag = sweep.tag_of(config)
     if got_hash != expect:
         print(f"Tier-2 {spec.name} {tag}: FAIL -- output hash {got_hash:08x} "
               f"!= independent reference {expect:08x}")
