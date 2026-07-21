@@ -119,6 +119,8 @@ struct ClusterParams {
   int64_t tcdmBytes = 0;       // SNRT_TCDM_SIZE (0 = absent). CONSUMED: derives
                                //   l1MemoryBytes (tcdm - stacks - margin) in
                                //   buildTranslationPassPipeline.
+  int64_t stackLog2 = 11;      // QUIDDITCH_L1_STACK_LOG2 (per-core stack size;
+                               //   quidditch's 2 KiB). CONSUMED in that derivation.
   int64_t seqInsns = 0;        // SNRT_NUM_SEQUENCER_INSNS.
                                // CONSUMED: bounds the xDSL FREP body size.
   int64_t fp64Latency = 0;     // CFG_LAT_COMP_FP64 (FPU FP64 pipeline depth, 0=absent).
@@ -155,6 +157,8 @@ static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
     p.computeCores = static_cast<unsigned>(*nr - *dm);
   if (std::optional<int64_t> t = cfgHeaderDefine(text, "SNRT_TCDM_SIZE"))
     p.tcdmBytes = *t;
+  if (std::optional<int64_t> s = cfgHeaderDefine(text, "QUIDDITCH_L1_STACK_LOG2"))
+    p.stackLog2 = *s;
   if (std::optional<int64_t> i = cfgHeaderDefine(text, "SNRT_NUM_SEQUENCER_INSNS"))
     p.seqInsns = *i;
   if (std::optional<int64_t> f = cfgHeaderDefine(text, "CFG_LAT_COMP_FP64"))
@@ -427,14 +431,14 @@ public:
             ClusterParams cp =
                 clusterParamsFromCfgHeader(targetOptions.clusterCfgHeader);
             if (cp.tcdmBytes && cp.coreNum)
-              // Match the runtime's own usable-heap computation (alloc_v2.h
-              // snrt_l1_init): TCDM minus one stack per core (ALL cores incl. the
-              // DM core) minus a 128-byte margin. The stack log2-size is 11 in the
-              // quidditch runtime (quidditch_cluster_defs.h #undefs the cfg
-              // header's 10) -- it MUST be 11 here; the cfg header's 10 would
-              // overshoot by ~9KB and smash the stacks. 131072-2048*9-128 = 112512.
+              // Usable L1 heap = TCDM - one stack per core (ALL cores incl. the
+              // DM core) - a 128-byte margin, matching the runtime's alloc_v2.h
+              // snrt_l1_init. The stack log2 is the cfg's QUIDDITCH_L1_STACK_LOG2,
+              // the single source shared with the runtime (quidditch_cluster_defs.h
+              // re-#defines SNRT_LOG2_STACK_SIZE to it); the default 11 stands in
+              // when the cfg header lacks the define.
               l1Bytes = static_cast<unsigned>(
-                  cp.tcdmBytes - (int64_t(1) << 11) * cp.coreNum - 128);
+                  cp.tcdmBytes - (int64_t(1) << cp.stackLog2) * cp.coreNum - 128);
             else
               l1Bytes = 100000; // no cfg header: the conservative legacy default
           }
