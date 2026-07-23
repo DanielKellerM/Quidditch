@@ -49,14 +49,14 @@ ROOT = os.path.dirname(os.path.dirname(_HERE))
 NINJA = os.environ.get("NINJA", f"{ROOT}/venv/bin/ninja")
 BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
 SIM = f"{ROOT}/snitch_cluster/target/sim"
-# QUIDDITCH_VLT selects the sim binary; point it at any cluster .vlt (e.g. a
-# per-SoC sim built by the deployment layer) to measure that cluster's cycles.
+# QUIDDITCH_VLT selects the sim binary (point at any cluster .vlt to retarget).
 VLT = os.environ.get("QUIDDITCH_VLT", f"{SIM}/build/bin/snitch_cluster.vlt")
 LLVM_STRIP = os.environ.get("QUIDDITCH_LLVM_STRIP", f"{ROOT}/toolchain/bin/llvm-strip")
 CCACHE = os.environ.get("CCACHE_DIR", f"{ROOT}/build-rt/.ccache")
 WORK = os.environ.get("QUIDDITCH_AUTOTUNE_WORK", f"{ROOT}/build-rt/autotune-work")
 
 SIM_WORKERS = int(os.environ.get("QUIDDITCH_SIM_WORKERS", "16"))
+SIM_HART_COUNT = int(os.environ.get("QUIDDITCH_SIM_HARTS", "9"))  # cluster harts to /dev/null-trace
 HARNESS_RE = re.compile(r"dispatch_cycles=(\d+).*?errors=(\d+)/\d+\s*->\s*(\w+)")
 
 
@@ -80,8 +80,7 @@ def rank_grid(grid, spec):
     # cost model is a gemm roofline -> ranks matmul only; sim elementwise grids unranked.
     if spec.op not in ("matmul", "matmul_transpose_b"):
         return list(grid)
-    # cost_model is blind to interchange (KSPLIT/MSPLIT use tile counts only), so
-    # interchange variants of a tile tuple rank together and are all simmed.
+    # cost_model is blind to interchange, so its variants rank together (all simmed).
     return sorted(grid, key=lambda c: cost_model(list(c[0]), c[1], spec.shape))
 
 
@@ -144,9 +143,9 @@ def run_sim(tag, elf):
     rd = f"{SIM}/runs/autotune_{tag}"
     shutil.rmtree(rd, ignore_errors=True)
     os.makedirs(f"{rd}/logs", exist_ok=True)
-    for i in range(9):
+    for i in range(SIM_HART_COUNT):
         try:
-            os.symlink("/dev/null", f"{rd}/logs/trace_hart_0000{i}.dasm")
+            os.symlink("/dev/null", f"{rd}/logs/trace_hart_{i:05x}.dasm")
         except OSError:
             pass
     try:
@@ -228,8 +227,7 @@ def main():
     os.makedirs(WORK, exist_ok=True)
     canary_check(spec, canary, ninja_elf)
 
-    # gemm_square reuses the prebuilt CMake object (canary byte-identity); other ops
-    # compile their config-invariant harness.o once and share it across builds.
+    # gemm_square reuses the prebuilt CMake object (canary); other ops build harness.o once.
     harness_obj = None
     if spec.name != "gemm_square":
         try:
