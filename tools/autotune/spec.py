@@ -17,7 +17,7 @@ import re
 import tomllib
 from dataclasses import dataclass
 
-ROOT = "/home/dankeller/Projects/Quidditch"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 OPS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ops")
 
 V1_OPS = {"matmul", "matmul_transpose_b", "elementwise"}

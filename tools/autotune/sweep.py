@@ -38,22 +38,23 @@ import subprocess
 import sys
 import tempfile
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
 from cost_model import cost_model
-from direct_build import build as direct_build, compile_harness
+from direct_build import build as direct_build, compile_harness, LLVM
 from gen_harness import generate as gen_harness_src
 from spec import load_spec, SpecError
 
-ROOT = "/home/dankeller/Projects/Quidditch"
+ROOT = os.path.dirname(os.path.dirname(_HERE))
 NINJA = f"{ROOT}/venv/bin/ninja"          # 1.13 (the non-dot venv has it)
 BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
 SIM = f"{ROOT}/snitch_cluster/target/sim"
 # QUIDDITCH_VLT selects the sim binary; point it at any cluster .vlt (e.g. a
 # per-SoC sim built by the deployment layer) to measure that cluster's cycles.
 VLT = os.environ.get("QUIDDITCH_VLT", f"{SIM}/build/bin/snitch_cluster.vlt")
-LLVM_STRIP = "/usr/scratch2/vulcano/colluca/tools/riscv32-snitch-llvm-almalinux8-15.0.0-snitch-0.5.0/bin/llvm-strip"
-CCACHE = "/scratch/dankeller/snitch-compiler/.ccache"
-WORK = "/scratch/dankeller/snitch-compiler/autotune-work"
+LLVM_STRIP = os.environ.get("QUIDDITCH_LLVM_STRIP", f"{LLVM}/llvm-strip")
+CCACHE = os.environ.get("CCACHE_DIR", f"{ROOT}/build-rt/.ccache")
+WORK = os.environ.get("QUIDDITCH_AUTOTUNE_WORK", f"{ROOT}/build-rt/autotune-work")
 
 SIM_WORKERS = 16
 HARNESS_RE = re.compile(r"dispatch_cycles=(\d+).*?errors=(\d+)/\d+\s*->\s*(\w+)")
@@ -90,18 +91,21 @@ def _strip_md5(elf):
     s = elf + ".stripped"
     shutil.copy(elf, s)
     subprocess.run([LLVM_STRIP, s], check=True)
-    return hashlib.md5(open(s, "rb").read()).hexdigest()
+    with open(s, "rb") as f:
+        return hashlib.md5(f.read()).hexdigest()
 
 
 def ninja_build(c, outdir, spec, ninja_elf):
     """Build one config via the real CMake/ninja path (only for the canary)."""
     tiles, db, _ix = c
-    orig = open(spec.mlir).read()
+    with open(spec.mlir) as f:
+        orig = f.read()
     try:
         s = re.sub(r"l1_tiles = \[[0-9, ]+\]",
                    f"l1_tiles = [{', '.join(str(t) for t in tiles)}]", orig)
         s = re.sub(r"dual_buffer = (?:true|false)", f"dual_buffer = {db}", s)
-        open(spec.mlir, "w").write(s)
+        with open(spec.mlir, "w") as f:
+            f.write(s)
         env = dict(os.environ, CCACHE_DIR=CCACHE)
         r = subprocess.run([NINJA, "-C", BUILD, "gemm_harness"], env=env,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -112,7 +116,8 @@ def ninja_build(c, outdir, spec, ninja_elf):
         shutil.copy(ninja_elf, dst)
         return dst
     finally:
-        open(spec.mlir, "w").write(orig)
+        with open(spec.mlir, "w") as f:
+            f.write(orig)
 
 
 def canary_check(spec, canary, ninja_elf):
@@ -266,7 +271,8 @@ def main():
                     f"{r.get('cycles','')}\t{sp}\t{rank_idx.get(r['tag'],'')}\n")
     if ok:
         best = dict(ok[0], kernel=spec.name)
-        json.dump(best, open(out_best, "w"), indent=2)
+        with open(out_best, "w") as f:
+            json.dump(best, f, indent=2)
         print(f"\nBEST: {best['tag']} = {best['cycles']} cyc"
               + (f" ({base / best['cycles']:.2f}x vs baseline)" if base else ""))
     return 0
