@@ -30,11 +30,21 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 # derive from it); set it to build-rt-gwaihir to retarget the gwaihir cluster.
 BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
 
-# --- absolute toolchain paths (from `ninja -t commands gemm_harness`) ---
-IREE_COMPILE = "/scratch/dankeller/snitch-compiler/iree-p6-build/tools/iree-compile"
-XDSL_OPT = "/scratch/dankeller/snitch-compiler/Quidditch/.venv/bin/xdsl-opt"
-TOOLCHAIN_ROOT = "/scratch/dankeller/snitch-compiler/Quidditch/toolchain"
-LLVM = "/usr/scratch2/vulcano/colluca/tools/riscv32-snitch-llvm-almalinux8-15.0.0-snitch-0.5.0/bin"
+# External tool locations (from `ninja -t commands gemm_harness`): env-overridable,
+# defaulting to the IIS build/toolchain layout. Only which binary runs -- not baked
+# into the compiled output, so overriding these does not perturb the canary.
+IREE_COMPILE = os.environ.get(
+    "QUIDDITCH_IREE_COMPILE",
+    "/scratch/dankeller/snitch-compiler/iree-p6-build/tools/iree-compile")
+XDSL_OPT = os.environ.get(
+    "QUIDDITCH_XDSL_OPT",
+    "/scratch/dankeller/snitch-compiler/Quidditch/.venv/bin/xdsl-opt")
+TOOLCHAIN_ROOT = os.environ.get(
+    "QUIDDITCH_TOOLCHAIN_ROOT",
+    "/scratch/dankeller/snitch-compiler/Quidditch/toolchain")
+LLVM = os.environ.get(
+    "QUIDDITCH_SNITCH_LLVM_BIN",
+    "/usr/scratch2/vulcano/colluca/tools/riscv32-snitch-llvm-almalinux8-15.0.0-snitch-0.5.0/bin")
 CLANG = f"{LLVM}/clang"
 LLVM_AR = f"{LLVM}/llvm-ar"
 LLVM_RANLIB = f"{LLVM}/llvm-ranlib"
@@ -259,7 +269,8 @@ def build(config, outdir, mlir_template=None, module="gemm_mod", harness_obj=Non
 if __name__ == "__main__":
     import sys
     cfg = {"l1_tiles": [16, 16, 16], "dual_buffer": "true"}
-    out = sys.argv[1] if len(sys.argv) > 1 else "/scratch/dankeller/snitch-compiler/autotune-work/direct_out"
+    out = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+        os.environ.get("QUIDDITCH_AUTOTUNE_WORK", f"{ROOT}/build-rt/autotune-work"), "direct_out")
     elf, err = build(cfg, out)
     if err:
         print("BUILD-FAIL:", err)
