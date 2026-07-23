@@ -41,7 +41,7 @@ import tempfile
 _HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HERE)
 from cost_model import cost_model
-from direct_build import build as direct_build, compile_harness, LLVM
+from direct_build import build as direct_build, compile_harness
 from gen_harness import generate as gen_harness_src
 from spec import load_spec, SpecError
 
@@ -52,7 +52,7 @@ SIM = f"{ROOT}/snitch_cluster/target/sim"
 # QUIDDITCH_VLT selects the sim binary; point it at any cluster .vlt (e.g. a
 # per-SoC sim built by the deployment layer) to measure that cluster's cycles.
 VLT = os.environ.get("QUIDDITCH_VLT", f"{SIM}/build/bin/snitch_cluster.vlt")
-LLVM_STRIP = os.environ.get("QUIDDITCH_LLVM_STRIP", f"{LLVM}/llvm-strip")
+LLVM_STRIP = os.environ.get("QUIDDITCH_LLVM_STRIP", f"{ROOT}/toolchain/bin/llvm-strip")
 CCACHE = os.environ.get("CCACHE_DIR", f"{ROOT}/build-rt/.ccache")
 WORK = os.environ.get("QUIDDITCH_AUTOTUNE_WORK", f"{ROOT}/build-rt/autotune-work")
 
@@ -77,8 +77,7 @@ def enumerate_grid(spec):
 
 
 def rank_grid(grid, spec):
-    # The cost model is a gemm roofline -> only ranks matmul. Elementwise grids are
-    # small + memory-bound (the model does not apply); sim them all, unranked.
+    # cost model is a gemm roofline -> ranks matmul only; sim elementwise grids unranked.
     if spec.op not in ("matmul", "matmul_transpose_b"):
         return list(grid)
     # cost_model is blind to interchange (KSPLIT/MSPLIT use tile counts only), so
@@ -229,9 +228,8 @@ def main():
     os.makedirs(WORK, exist_ok=True)
     canary_check(spec, canary, ninja_elf)
 
-    # Harness object: gemm_square reuses the prebuilt CMake object so its canary
-    # stays byte-identical; any other op compiles its harness.o once (config-
-    # invariant) and shares it across the parallel per-config builds.
+    # gemm_square reuses the prebuilt CMake object (canary byte-identity); other ops
+    # compile their config-invariant harness.o once and share it across builds.
     harness_obj = None
     if spec.name != "gemm_square":
         try:
