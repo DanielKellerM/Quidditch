@@ -25,7 +25,7 @@ import shutil
 import subprocess
 import tempfile
 
-ROOT = "/home/dankeller/Projects/Quidditch"
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # QUIDDITCH_BUILD_RT selects the runtime tree (cfg header + archives + includes all
 # derive from it); set it to build-rt-gwaihir to retarget the gwaihir cluster.
 BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
