@@ -76,17 +76,17 @@ CONST_ARCHIVES = [
 ]
 # Linker -L search dirs (where base.ld lives + rtl libs); from build.ninja:24489.
 LDIRS = [
-    "/scratch/dankeller/snitch-compiler/Quidditch/snitch_cluster/sw/runtime",  # base.ld
+    f"{ROOT}/snitch_cluster/sw/runtime",  # base.ld
     f"{ROOT}/runtime/snitch_cluster/rtl",
 ]
 # Include dirs for the gemm_mod_module.c stub compile (build.ninja:24404). The
 # only per-config-relevant one is the gemm_mod dir holding the generated .h; we
 # point it at the per-config temp dir below. The rest are constant headers.
 CONST_INCLUDES = [
-    "/scratch/dankeller/snitch-compiler/Quidditch/iree",
+    f"{ROOT}/iree",
     f"{BUILD}/iree-configuration/iree",
-    "/scratch/dankeller/snitch-compiler/Quidditch/iree/third_party/printf/src",
-    "/scratch/dankeller/snitch-compiler/Quidditch/iree/runtime/src",
+    f"{ROOT}/iree/third_party/printf/src",
+    f"{ROOT}/iree/runtime/src",
     f"{BUILD}/iree-configuration/iree/runtime/src",
 ]
 CONST_DEFS = [
@@ -116,8 +116,8 @@ HARNESS_INC = [
     f"{BUILD}/iree-configuration/iree/runtime/plugins/Quidditch/src",
 ]
 HARNESS_ISYSTEM = [
-    "/scratch/dankeller/snitch-compiler/Quidditch/snitch_cluster/sw/runtime/api",
-    "/scratch/dankeller/snitch-compiler/Quidditch/snitch_cluster/sw/deps/riscv-opcodes",
+    f"{ROOT}/snitch_cluster/sw/runtime/api",
+    f"{ROOT}/snitch_cluster/sw/deps/riscv-opcodes",
     f"{ROOT}/runtime/snitch_cluster/api",
 ]
 # Minimal module header (the query declaration is config-invariant); lets the
