@@ -46,7 +46,7 @@ from gen_harness import generate as gen_harness_src
 from spec import load_spec, SpecError
 
 ROOT = os.path.dirname(os.path.dirname(_HERE))
-NINJA = f"{ROOT}/venv/bin/ninja"          # 1.13 (the non-dot venv has it)
+NINJA = os.environ.get("NINJA", f"{ROOT}/venv/bin/ninja")
 BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
 SIM = f"{ROOT}/snitch_cluster/target/sim"
 # QUIDDITCH_VLT selects the sim binary; point it at any cluster .vlt (e.g. a
@@ -56,7 +56,7 @@ LLVM_STRIP = os.environ.get("QUIDDITCH_LLVM_STRIP", f"{LLVM}/llvm-strip")
 CCACHE = os.environ.get("CCACHE_DIR", f"{ROOT}/build-rt/.ccache")
 WORK = os.environ.get("QUIDDITCH_AUTOTUNE_WORK", f"{ROOT}/build-rt/autotune-work")
 
-SIM_WORKERS = 16
+SIM_WORKERS = int(os.environ.get("QUIDDITCH_SIM_WORKERS", "16"))
 HARNESS_RE = re.compile(r"dispatch_cycles=(\d+).*?errors=(\d+)/\d+\s*->\s*(\w+)")
 
 
@@ -69,8 +69,7 @@ def tag_of(c, spec):
 
 
 def enumerate_grid(spec):
-    # config = (tiles, dual_buffer, interchange); tiles/ix have spec.ndims entries
-    # (3 for matmul M,N,K; 1 for a 1-D elementwise op).
+    # config = (tiles, dual_buffer, interchange); tiles/ix have spec.ndims entries.
     return [(tiles, db, tuple(ix))
             for tiles in itertools.product(spec.tile_choices, repeat=spec.ndims)
             for db in spec.dual_buffer

@@ -71,7 +71,8 @@ def _reject(name, msg):
 
 
 def _check_mlir_scope(name, mlir):
-    raw = open(mlir).read()
+    with open(mlir) as f:
+        raw = f.read()
     text = re.sub(r"//[^\n]*", "", raw)          # strip comments: prose mentions ops too
     if re.search(r"tensor<[^>]*\?", text):
         _reject(name, "dynamic tensor shape (v1 is static-shape only)")

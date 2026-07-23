@@ -14,11 +14,9 @@
 #   - the gemm_mod_module.c stub (#define EMITC_IMPLEMENTATION + #include "..._module.h")
 #
 # Each call builds in its OWN temp dir; nothing under build-rt is written, so
-# concurrent builds cannot race. Extracted verbatim from:
-#   build-rt/build.ninja:24582 (iree-compile custom command)
-#   build-rt/build.ninja:24404 (.c -> bitcode .obj)
-#   build-rt/build.ninja:24420 (llvm-ar/ranlib -> libgemm_mod.a)
-#   build-rt/build.ninja:24489 + :1015 (final gemm_harness link)
+# concurrent builds cannot race. The recipe mirrors the gemm_harness ninja edges
+# (iree-compile custom command, .c -> bitcode, llvm-ar/ranlib, final link);
+# re-extract via `ninja -t commands gemm_harness` if the build rule drifts.
 import os
 import re
 import shutil
@@ -36,12 +34,8 @@ BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
 IREE_COMPILE = os.environ.get(
     "QUIDDITCH_IREE_COMPILE",
     "/scratch/dankeller/snitch-compiler/iree-p6-build/tools/iree-compile")
-XDSL_OPT = os.environ.get(
-    "QUIDDITCH_XDSL_OPT",
-    "/scratch/dankeller/snitch-compiler/Quidditch/.venv/bin/xdsl-opt")
-TOOLCHAIN_ROOT = os.environ.get(
-    "QUIDDITCH_TOOLCHAIN_ROOT",
-    "/scratch/dankeller/snitch-compiler/Quidditch/toolchain")
+XDSL_OPT = os.environ.get("QUIDDITCH_XDSL_OPT", f"{ROOT}/.venv/bin/xdsl-opt")
+TOOLCHAIN_ROOT = os.environ.get("QUIDDITCH_TOOLCHAIN_ROOT", f"{ROOT}/toolchain")
 LLVM = os.environ.get(
     "QUIDDITCH_SNITCH_LLVM_BIN",
     "/usr/scratch2/vulcano/colluca/tools/riscv32-snitch-llvm-almalinux8-15.0.0-snitch-0.5.0/bin")
@@ -74,12 +68,12 @@ CONST_ARCHIVES = [
     f"{BUILD}/iree-configuration/iree/runtime/src/iree/base/libiree_base_base.a",
     f"{BUILD}/iree-configuration/iree/runtime/src/iree/base/internal/libiree_base_internal_time.a",
 ]
-# Linker -L search dirs (where base.ld lives + rtl libs); from build.ninja:24489.
+# Linker -L search dirs (where base.ld lives + rtl libs).
 LDIRS = [
     f"{ROOT}/snitch_cluster/sw/runtime",  # base.ld
     f"{ROOT}/runtime/snitch_cluster/rtl",
 ]
-# Include dirs for the gemm_mod_module.c stub compile (build.ninja:24404). The
+# Include dirs for the gemm_mod_module.c stub compile. The
 # only per-config-relevant one is the gemm_mod dir holding the generated .h; we
 # point it at the per-config temp dir below. The rest are constant headers.
 CONST_INCLUDES = [
@@ -96,11 +90,11 @@ CONST_DEFS = [
     "-DPRINTF_SUPPORT_WRITEBACK_SPECIFIER=0",
     "-D_ISOC11_SOURCE",
 ]
-# Common compile flags (build.ninja:600/748 LANGUAGE_COMPILE_FLAGS + std/lto).
+# Common compile flags (LANGUAGE_COMPILE_FLAGS + std/lto).
 CFLAGS = ["-mcpu=snitch", "-menable-experimental-extensions", "-mabi=ilp32d",
           "-mcmodel=medany", "-msmall-data-limit=0", "-O3", "-DNDEBUG",
           "-std=gnu11", "-flto=thin"]
-# Link flags (build.ninja:1015 LINK_FLAGS) + the per-edge extras (build.ninja:24489).
+# Link flags (LINK_FLAGS) + the per-edge extras.
 LINK_FLAGS = ["-mcpu=snitch", "-menable-experimental-extensions", "-mabi=ilp32d",
               "-mcmodel=medany", "-msmall-data-limit=0", "-O3", "-DNDEBUG",
               "-flto=thin", "-mcpu=snitch", "-menable-experimental-extensions",
