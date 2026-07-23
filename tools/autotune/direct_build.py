@@ -28,21 +28,26 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 # derive from it); set it to build-rt-gwaihir to retarget the gwaihir cluster.
 BUILD = os.environ.get("QUIDDITCH_BUILD_RT", f"{ROOT}/build-rt")
 
-# External tool locations (from `ninja -t commands gemm_harness`): env-overridable,
-# defaulting to the IIS build/toolchain layout. Only which binary runs -- not baked
-# into the compiled output, so overriding these does not perturb the canary.
-IREE_COMPILE = os.environ.get(
-    "QUIDDITCH_IREE_COMPILE",
-    "/scratch/dankeller/snitch-compiler/iree-p6-build/tools/iree-compile")
+# Tool locations, env-overridable. xdsl-opt and the toolchain resolve in-tree; the
+# separately-built iree-compile and the snitch-LLVM 15 fork (`-mcpu=snitch`, NOT the
+# host toolchain's clang) have no in-tree path, so they are required via env
+# (checked in _require_external_tools before any build).
+IREE_COMPILE = os.environ.get("QUIDDITCH_IREE_COMPILE", "")
 XDSL_OPT = os.environ.get("QUIDDITCH_XDSL_OPT", f"{ROOT}/.venv/bin/xdsl-opt")
 TOOLCHAIN_ROOT = os.environ.get("QUIDDITCH_TOOLCHAIN_ROOT", f"{ROOT}/toolchain")
-LLVM = os.environ.get(
-    "QUIDDITCH_SNITCH_LLVM_BIN",
-    "/usr/scratch2/vulcano/colluca/tools/riscv32-snitch-llvm-almalinux8-15.0.0-snitch-0.5.0/bin")
+LLVM = os.environ.get("QUIDDITCH_SNITCH_LLVM_BIN", "")
 CLANG = f"{LLVM}/clang"
 LLVM_AR = f"{LLVM}/llvm-ar"
 LLVM_RANLIB = f"{LLVM}/llvm-ranlib"
 LD_LLD = f"{LLVM}/ld.lld"
+
+
+def _require_external_tools():
+    missing = [v for v, p in (("QUIDDITCH_IREE_COMPILE", IREE_COMPILE),
+                              ("QUIDDITCH_SNITCH_LLVM_BIN", LLVM)) if not p]
+    if missing:
+        raise SystemExit("autotune: set " + ", ".join(missing) +
+                         " (the separately-built iree-compile / snitch-LLVM 15 bin dir)")
 
 # cfg-generated cluster header for --iree-quidditch-cluster-cfg-header (the target's
 # compute_cores = CFG_CLUSTER_NR_CORES - SNRT_CLUSTER_DM_CORE_NUM). Prefer the
@@ -146,6 +151,7 @@ def compile_harness(harness_c, module, query_symbol, out_obj, defines=()):
     once per op). Synthesizes a minimal <module>.h (query declaration) so it does
     not need iree-compile to have run first. `defines` adds extra -D flags (e.g.
     -DHARNESS_DUMP_OUTPUT for the Tier-2 cross-check). Returns (out_obj, None) or (None, err)."""
+    _require_external_tools()
     tmp = tempfile.mkdtemp(prefix="qd_harness_")
     try:
         with open(os.path.join(tmp, f"{module}.h"), "w") as f:
@@ -178,14 +184,14 @@ def build(config, outdir, mlir_template=None, module="gemm_mod", harness_obj=Non
     The legality gate scans iree-compile stderr for 'error:' because
     --iree-quidditch-assert-compiled exits 0 even when it rejects a tiling.
     """
+    _require_external_tools()
     os.makedirs(outdir, exist_ok=True)
     work = tempfile.mkdtemp(prefix="qd_cfg_", dir=outdir)
     moddir = os.path.join(work, module)
     os.makedirs(moddir, exist_ok=True)
 
-    # Per-config kernel: inject lowering_config into a temp copy of the .mlir.
-    # Keep the original basename so iree-compile's embedded names match the ninja
-    # build (the gemm canary asserts stripped-ELF identity).
+    # inject lowering_config into a temp .mlir; keep the basename so iree-compile's
+    # embedded names match ninja (the gemm canary asserts stripped-ELF identity).
     template = mlir_template or MLIR_TEMPLATE
     mlir = os.path.join(work, os.path.basename(template))
     with open(template) as f:
