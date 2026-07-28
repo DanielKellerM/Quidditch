@@ -1,24 +1,17 @@
 #!/usr/bin/env bash
-# Flow->HAL materialization gate (S2/2b): prove that materializing a hal.executable
-# directly from flow.executable (quidditch-materialize-executable-from-flow) yields a
-# device object byte-identical to IREE's full Stream+MaterializeInterfaces path.
-#
-# The pass is device-only: it drops the host dispatch callers, so nothing references
-# the export and IREE's executable-sources->hal pipeline (which still runs symbol-DCE)
-# would prune it. To exercise codegen through that harness we splice the reference
-# host func back as a liveness anchor -- the standalone quidditch-compile pipeline
-# will instead omit executable-pruning, so no anchor is needed there.
+# Flow->HAL materialization gate (S2/2b): the device object from the pass alone
+# (quidditch-materialize-executable-from-flow) is byte-identical to the full path. The
+# pass is device-only, so IREE's executable-sources->hal harness would DCE-prune the
+# unreferenced executable; the reference host func is spliced back as a liveness anchor.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/gate_lib.sh"
 IREE_COMPILE=${QUIDDITCH_IREE_COMPILE:?set QUIDDITCH_IREE_COMPILE to the iree-compile path}
 QUIDDITCH_OPT=${QUIDDITCH_OPT:?set QUIDDITCH_OPT to the quidditch-opt path}
 XDSL_OPT=${QUIDDITCH_XDSL_OPT:?set QUIDDITCH_XDSL_OPT to the xdsl-opt path}
 TOOLCHAIN_ROOT=${QUIDDITCH_TOOLCHAIN_ROOT:?set QUIDDITCH_TOOLCHAIN_ROOT}
 CFG_HEADER=${QUIDDITCH_CFG_HEADER:?set QUIDDITCH_CFG_HEADER to the snitch_cluster_cfg.h path}
-OBJDUMP=${QUIDDITCH_OBJDUMP:?set QUIDDITCH_OBJDUMP to a Snitch llvm-objdump}
-
-SHAPES=(gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir gemm_bias.stablehlo.mlir)
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -30,12 +23,8 @@ common=(--iree-input-type=auto --iree-input-demote-f64-to-f32=0
         --iree-quidditch-cluster-cfg-header="$CFG_HEADER"
         --iree-quidditch-config-table="$HERE/gemm_square_config.json")
 
-norm() { "$OBJDUMP" -d --mattr=+xdma,+xssr,+xfrep "$1" \
-           | grep -vE 'file format|^/|:[[:space:]]*$' \
-           | sed -E 's/^[0-9a-f ]+://; s/matmul_like/matmul/g'; }
-
 rc=0
-for shlo in "${SHAPES[@]}"; do
+for shlo in "${GATE_SHAPES[@]}"; do
   in="$HERE/$shlo"
   "$IREE_COMPILE" "${common[@]}" \
     --iree-quidditch-static-library-output-path="$WORK/full.o" \

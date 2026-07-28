@@ -1,31 +1,28 @@
 #!/usr/bin/env bash
-# The standalone Quidditch compile pipeline (S2/2b): StableHLO input -> Snitch device
-# object, with NO Stream / VM / EmitC and NO HAL executable-pruning.
-#
-# Two stages, both reusing existing tooling:
-#   1. iree-compile --compile-to=flow      StableHLO -> linalg -> GlobalOpt ->
-#                                          DispatchCreation -> Flow (front-end, as-is).
-#   2. iree-opt --pass-pipeline=<tail>      Flow -> device .o. The tail is exactly:
-#        quidditch-materialize-executable-from-flow  (replaces Stream+MaterializeInterfaces)
-#        iree-hal-configure-executables              (select the Snitch tiling strategy)
-#        iree-hal-translate-all-executables          (xDSL/Snitch codegen)
-#        iree-hal-serialize-all-executables          (emit the static library .o)
-#      ConvertToHAL (host program), LinkExecutables and the three PruneExecutables/
-#      SymbolDCE passes of the full HAL pipeline are deliberately omitted: this is a
-#      device-only compiler, so nothing references the executable and pruning would
-#      drop it -- omitting the prune is what makes the device-only path work without a
-#      host liveness anchor.
-#
-# Proven byte-identical to IREE's full Stream+HAL path (see check verb below).
+# The standalone Stream-free compile pipeline (S2/2b): StableHLO -> Snitch device .o,
+# no Stream/VM/EmitC. Two reused stages -- iree-compile --compile-to=flow (front) then
+# iree-opt running the device-only tail. Byte-identical to the full path (see `check`).
 set -euo pipefail
 
-IREE_COMPILE=${QUIDDITCH_IREE_COMPILE:?set QUIDDITCH_IREE_COMPILE to the iree-compile path}
+# Derive the tool paths from the runtime build's CMakeCache (the single source of
+# truth cmake already resolved) when QUIDDITCH_BUILD_DIR is set, so callers can't
+# hand-pick the broken venv/ xdsl-opt or a pulp-as-less toolchain. Env vars override.
+if [[ -n "${QUIDDITCH_BUILD_DIR:-}" && -f "${QUIDDITCH_BUILD_DIR}/CMakeCache.txt" ]]; then
+  _cache="${QUIDDITCH_BUILD_DIR}/CMakeCache.txt"
+  _cache_get() { sed -n "s/^$1[^=]*=//p" "$_cache" | head -1; }
+  : "${QUIDDITCH_XDSL_OPT:=$(_cache_get XDSL_OPT_PATH)}"
+  : "${QUIDDITCH_TOOLCHAIN_ROOT:=$(_cache_get QUIDDITCH_TOOLCHAIN_ROOT)}"
+  : "${QUIDDITCH_IREE_COMPILE:=$(_cache_get IREE_COMPILE_PATH)}"
+fi
+
+IREE_COMPILE=${QUIDDITCH_IREE_COMPILE:?set QUIDDITCH_IREE_COMPILE to the iree-compile path (or QUIDDITCH_BUILD_DIR)}
 IREE_OPT=${QUIDDITCH_IREE_OPT:?set QUIDDITCH_IREE_OPT to an iree-opt built with the quidditch plugin}
 XDSL_OPT=${QUIDDITCH_XDSL_OPT:?set QUIDDITCH_XDSL_OPT to the xdsl-opt path}
 TOOLCHAIN_ROOT=${QUIDDITCH_TOOLCHAIN_ROOT:?set QUIDDITCH_TOOLCHAIN_ROOT}
 CFG_HEADER=${QUIDDITCH_CFG_HEADER:?set QUIDDITCH_CFG_HEADER to the snitch_cluster_cfg.h path}
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/gate_lib.sh"
 CONFIG_TABLE=${QUIDDITCH_CONFIG_TABLE:-$HERE/gemm_square_config.json}
 
 qflags=(--iree-quidditch-xdsl-opt-path="$XDSL_OPT"
@@ -34,14 +31,16 @@ qflags=(--iree-quidditch-xdsl-opt-path="$XDSL_OPT"
         --iree-quidditch-config-table="$CONFIG_TABLE")
 
 # quidditch-link-executables (module-level) merges per-dispatch executables into one
-# before serialize -- a no-op for a single executable, required for more than one. NB:
-# multi-dispatch binding offsets are 0 here (separate-buffer semantics); IREE's Stream
-# assigns packed offsets, which the Stream-free path does not reproduce -- so a
-# multi-dispatch program links correctly but is not byte-identical to the full path.
+# before serialize -- a no-op for a single executable, required for more than one.
 TAIL='builtin.module(quidditch-materialize-executable-from-flow, hal.executable(iree-hal-configure-executables, iree-hal-translate-all-executables), quidditch-link-executables, hal.executable(iree-hal-serialize-all-executables))'
 
-# quidditch_compile <input.stablehlo.mlir> <out.o>
-quidditch_compile() {
+full_hal() { # <in.mlir> <out.o> : the reference object via the full Stream+HAL path
+  "$IREE_COMPILE" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
+    --iree-hal-target-backends=quidditch "${qflags[@]}" \
+    --iree-quidditch-static-library-output-path="$2" --compile-to=hal "$1" -o /dev/null
+}
+
+quidditch_compile() { # <in.stablehlo.mlir> <out.o> : the two-stage Stream-free pipeline
   local in="$1" out="$2" flow
   flow="$(mktemp --suffix=.mlir)"
   "$IREE_COMPILE" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
@@ -52,66 +51,40 @@ quidditch_compile() {
   rm -f "$flow"
 }
 
+# Compare each shape's candidate object (produced by $1 <in> <out.o>) to the full path.
+run_gate() {
+  local produce="$1" what="$2" rc=0
+  local work; work=$(mktemp -d); trap 'rm -rf "$work"' RETURN
+  for shlo in "${GATE_SHAPES[@]}"; do
+    full_hal "$HERE/$shlo" "$work/full.o"
+    "$produce" "$HERE/$shlo" "$work/cand.o"
+    if [ -s "$work/cand.o" ] && diff <(norm "$work/full.o") <(norm "$work/cand.o") >/dev/null; then
+      echo "PASS: $shlo $what byte-identical to the full Stream+HAL path"
+    else
+      echo "FAIL: $shlo $what diverged" >&2
+      diff <(norm "$work/full.o") <(norm "$work/cand.o") | head >&2
+      rc=1
+    fi
+  done
+  return $rc
+}
+
+# The fused single binary as a candidate producer, so `check-binary` reuses run_gate.
+quidditch_compile_binary() {
+  "${QUIDDITCH_COMPILE:?set QUIDDITCH_COMPILE to the quidditch-compile binary}" "$1" \
+    --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
+    --iree-hal-target-backends=quidditch "${qflags[@]}" \
+    --iree-quidditch-static-library-output-path="$2"
+}
+
 usage() {
   echo "usage: $0 compile <in.stablehlo.mlir> <out.o> | check | check-binary" >&2
   exit 2
 }
 
 case "${1:-}" in
-  compile)
-    [ $# -eq 3 ] || usage
-    quidditch_compile "$2" "$3"
-    ;;
-  check)
-    OBJDUMP=${QUIDDITCH_OBJDUMP:?set QUIDDITCH_OBJDUMP to a Snitch llvm-objdump}
-    WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
-    norm() { "$OBJDUMP" -d --mattr=+xdma,+xssr,+xfrep "$1" \
-               | grep -vE 'file format|^/|:[[:space:]]*$' \
-               | sed -E 's/^[0-9a-f ]+://; s/matmul_like/matmul/g'; }
-    rc=0
-    for shlo in gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir gemm_bias.stablehlo.mlir; do
-      "$IREE_COMPILE" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
-        --iree-hal-target-backends=quidditch "${qflags[@]}" \
-        --iree-quidditch-static-library-output-path="$WORK/full.o" \
-        --compile-to=hal "$HERE/$shlo" -o /dev/null
-      quidditch_compile "$HERE/$shlo" "$WORK/out.o"
-      if diff <(norm "$WORK/full.o") <(norm "$WORK/out.o") >/dev/null; then
-        echo "PASS: $shlo standalone pipeline byte-identical to the full Stream+HAL path"
-      else
-        echo "FAIL: $shlo standalone pipeline diverged" >&2
-        diff <(norm "$WORK/full.o") <(norm "$WORK/out.o") | head >&2
-        rc=1
-      fi
-    done
-    exit $rc
-    ;;
-  check-binary)
-    # Same byte-exact check, but exercising the fused single-binary quidditch-compile
-    # (not the two-stage iree-compile|iree-opt path) so the shipped tool is gated too.
-    QC=${QUIDDITCH_COMPILE:?set QUIDDITCH_COMPILE to the quidditch-compile binary}
-    OBJDUMP=${QUIDDITCH_OBJDUMP:?set QUIDDITCH_OBJDUMP to a Snitch llvm-objdump}
-    WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
-    norm() { "$OBJDUMP" -d --mattr=+xdma,+xssr,+xfrep "$1" \
-               | grep -vE 'file format|^/|:[[:space:]]*$' \
-               | sed -E 's/^[0-9a-f ]+://; s/matmul_like/matmul/g'; }
-    rc=0
-    for shlo in gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir gemm_bias.stablehlo.mlir; do
-      "$IREE_COMPILE" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
-        --iree-hal-target-backends=quidditch "${qflags[@]}" \
-        --iree-quidditch-static-library-output-path="$WORK/full.o" \
-        --compile-to=hal "$HERE/$shlo" -o /dev/null
-      "$QC" "$HERE/$shlo" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
-        --iree-hal-target-backends=quidditch "${qflags[@]}" \
-        --iree-quidditch-static-library-output-path="$WORK/bin.o"
-      if [ -s "$WORK/bin.o" ] && diff <(norm "$WORK/full.o") <(norm "$WORK/bin.o") >/dev/null; then
-        echo "PASS: $shlo quidditch-compile binary byte-identical to the full Stream+HAL path"
-      else
-        echo "FAIL: $shlo quidditch-compile binary diverged" >&2
-        diff <(norm "$WORK/full.o") <(norm "$WORK/bin.o") | head >&2
-        rc=1
-      fi
-    done
-    exit $rc
-    ;;
+  compile) [ $# -eq 3 ] || usage; quidditch_compile "$2" "$3" ;;
+  check) run_gate quidditch_compile "standalone pipeline" ;;
+  check-binary) run_gate quidditch_compile_binary "quidditch-compile binary" ;;
   *) usage ;;
 esac

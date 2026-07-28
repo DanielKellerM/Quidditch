@@ -1,16 +1,6 @@
-// quidditch-compile: single-binary Stream-free device compiler for Snitch.
-//
-// Compiles a StableHLO (or linalg) input straight to a Snitch device object with no
-// Stream / VM / EmitC. It runs the two proven stages fused in one process:
-//   1. the standard front, to the `flow` phase (input -> linalg -> GlobalOpt ->
-//      DispatchCreation -> Flow), via buildIREEPrecompileTransformPassPipeline;
-//   2. the device-only tail: materialize hal.executables from flow.executables, then
-//      configure + translate (codegen) + serialize. ConvertToHAL, LinkExecutables and
-//      the HAL pruning passes are omitted -- a device-only compiler needs none.
-// The object is written by the serialize pass via
-// --iree-quidditch-static-library-output-path. Setup mirrors iree-opt
-// (IREEOptToolEntryPoint): plugins are loaded and their target backends merged into
-// the global registry so the tail's HAL passes resolve the "quidditch" backend.
+// quidditch-compile: StableHLO/linalg -> Snitch device object, Stream/VM/EmitC-free.
+// Front (to the Flow phase) + the device-only tail; the .o is written by the serialize
+// pass via --iree-quidditch-static-library-output-path.
 
 #include "iree/compiler/ConstEval/Passes.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
@@ -45,8 +35,7 @@ int main(int argc, char **argv) {
   registerAllPasses();
   registerLLVMIRTranslations(registry);
 
-  // Load plugins (the statically linked Quidditch + StableHLO input plugins) and let
-  // them register their global dialects, passes and CLI options before flag parsing.
+  // Load plugins and register their dialects/passes/CLI options before flag parsing.
   PluginManager pluginManager;
   if (!pluginManager.loadAvailablePlugins()) {
     llvm::errs() << "error: failed to initialize compiler plugins\n";
@@ -63,8 +52,7 @@ int main(int argc, char **argv) {
   registerMLIRContextCLOptions();
   registerPassManagerCLOptions();
   auto &pluginManagerOptions = PluginManagerOptions::FromFlags::get();
-  // Force registration of every option group's flags before parsing (the front-end
-  // pipeline reads them all): each FromFlags::get() registers its flags on first call.
+  // Register every option group's flags before parsing (the front-end reads them all).
   GlobalPipelineOptions::FromFlags::get();
   BindingOptions::FromFlags::get();
   InputDialectOptions::FromFlags::get();
@@ -82,8 +70,8 @@ int main(int argc, char **argv) {
       "Emit the object with --iree-quidditch-static-library-output-path=<out.o>.\n");
   OptionsBinder::global().applyOptimizationDefaults();
 
-  // Activate plugins and merge their target devices/backends into the global
-  // registry -- the tail's HAL passes resolve the backend from there.
+  // Merge the plugins' target devices/backends into the global registry -- the tail's
+  // HAL passes resolve the "quidditch" backend from there.
   auto localBinder = OptionsBinder::local();
   PluginManagerSession pluginSession(pluginManager, localBinder,
                                      pluginManagerOptions);
@@ -122,9 +110,7 @@ int main(int argc, char **argv) {
   };
   hooks.pipelineExtensions = &pluginSession;
 
-  // Stage 1: front-end, to the flow dialect (the precompile builder stops at
-  // GlobalOptimization; DispatchCreation + Flow live in the VM builder, which we run
-  // only up to the Flow phase -- Stream/HAL/VM never execute).
+  // Stage 1: front-end run only to the Flow phase (Stream/HAL/VM never execute).
   buildIREEVMTransformPassPipeline(
       globalRegistry, GlobalPipelineOptions::FromFlags::get(),
       BindingOptions::FromFlags::get(), InputDialectOptions::FromFlags::get(),
@@ -135,9 +121,7 @@ int main(int argc, char **argv) {
       IREE::VM::TargetOptions::FromFlags::get(), hooks, pm,
       IREEVMPipelinePhase::Start, IREEVMPipelinePhase::Flow);
 
-  // Stage 2: Flow -> device object (serialize writes the .o via the plugin flag).
-  // quidditch-link-executables (module-level) merges the per-dispatch executables into
-  // one before serialize -- a no-op for a single executable, required for more than one.
+  // Stage 2: Flow -> device object; link merges per-dispatch executables before serialize.
   pm.addPass(quidditch::createMaterializeExecutableFromFlowPass());
   auto &translatePM = pm.nest<IREE::HAL::ExecutableOp>();
   translatePM.addPass(IREE::HAL::createConfigureExecutablesPass());
