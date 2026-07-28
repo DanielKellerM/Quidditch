@@ -3,5 +3,11 @@
     "l1_tiles": [8, 8, 8],
     "l1_tiles_interchange": [2, 0, 1],
     "dual_buffer": true
+  },
+  "gemm64_dispatch_0_matmul_64x64x64_f64": {
+    "workgroup_tiles": [16, 16, 0],
+    "l1_tiles": [8, 8, 8],
+    "l1_tiles_interchange": [2, 0, 1],
+    "dual_buffer": false
   }
 }

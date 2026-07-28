@@ -13,6 +13,15 @@ quidditch_module(
     FLAGS --iree-quidditch-config-table=${CMAKE_CURRENT_SOURCE_DIR}/gemm_square_config.json
 )
 
+# 64x64 / 16-workgroup multi-cluster variant of the front-door (workgroup_tiles
+# also comes from the config table).
+quidditch_module(
+    SRC gemm_square_4x4.stablehlo.mlir
+    DST gemm_stablehlo_4x4_mod
+    ASSERT_XDSL
+    FLAGS --iree-quidditch-config-table=${CMAKE_CURRENT_SOURCE_DIR}/gemm_square_config.json
+)
+
 add_executable(gemm_square main.c)
 target_link_libraries(
     gemm_square
