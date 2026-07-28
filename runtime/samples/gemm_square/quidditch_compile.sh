@@ -47,7 +47,10 @@ quidditch_compile() {
   rm -f "$flow"
 }
 
-usage() { echo "usage: $0 compile <in.stablehlo.mlir> <out.o> | check" >&2; exit 2; }
+usage() {
+  echo "usage: $0 compile <in.stablehlo.mlir> <out.o> | check | check-binary" >&2
+  exit 2
+}
 
 case "${1:-}" in
   compile)
@@ -72,6 +75,34 @@ case "${1:-}" in
       else
         echo "FAIL: $shlo standalone pipeline diverged" >&2
         diff <(norm "$WORK/full.o") <(norm "$WORK/out.o") | head >&2
+        rc=1
+      fi
+    done
+    exit $rc
+    ;;
+  check-binary)
+    # Same byte-exact check, but exercising the fused single-binary quidditch-compile
+    # (not the two-stage iree-compile|iree-opt path) so the shipped tool is gated too.
+    QC=${QUIDDITCH_COMPILE:?set QUIDDITCH_COMPILE to the quidditch-compile binary}
+    OBJDUMP=${QUIDDITCH_OBJDUMP:?set QUIDDITCH_OBJDUMP to a Snitch llvm-objdump}
+    WORK=$(mktemp -d); trap 'rm -rf "$WORK"' EXIT
+    norm() { "$OBJDUMP" -d --mattr=+xdma,+xssr,+xfrep "$1" \
+               | grep -vE 'file format|^/|:[[:space:]]*$' \
+               | sed -E 's/^[0-9a-f ]+://; s/matmul_like/matmul/g'; }
+    rc=0
+    for shlo in gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir; do
+      "$IREE_COMPILE" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
+        --iree-hal-target-backends=quidditch "${qflags[@]}" \
+        --iree-quidditch-static-library-output-path="$WORK/full.o" \
+        --compile-to=hal "$HERE/$shlo" -o /dev/null
+      "$QC" "$HERE/$shlo" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
+        --iree-hal-target-backends=quidditch "${qflags[@]}" \
+        --iree-quidditch-static-library-output-path="$WORK/bin.o"
+      if [ -s "$WORK/bin.o" ] && diff <(norm "$WORK/full.o") <(norm "$WORK/bin.o") >/dev/null; then
+        echo "PASS: $shlo quidditch-compile binary byte-identical to the full Stream+HAL path"
+      else
+        echo "FAIL: $shlo quidditch-compile binary diverged" >&2
+        diff <(norm "$WORK/full.o") <(norm "$WORK/bin.o") | head >&2
         rc=1
       fi
     done
