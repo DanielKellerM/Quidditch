@@ -5,6 +5,8 @@
 #include "iree/compiler/Codegen/Utils/CPUUtils.h"
 #include "iree/compiler/Codegen/Utils/Utils.h"
 #include "iree/compiler/Dialect/HAL/IR/HALOps.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/Dialect/MemRef/Transforms/Transforms.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -93,23 +95,27 @@ static void applyConfigTable(StringRef name, StringRef configTable,
 
 static LogicalResult setRootConfig(FunctionOpInterface funcOp, Operation *rootOp,
                                    StringRef configTable) {
-  return TypeSwitch<Operation *, LogicalResult>(rootOp)
-      .Case<linalg::MatmulTransposeBOp>([&](linalg::MatmulTransposeBOp op) {
-        (void)op;
-        SmallVector<int64_t> workgroupTiles(3, 0);
-        SmallVector<int64_t> l1Tiles(3, 0);
-        SmallVector<int64_t> l1Interchange = {2, 0, 1};
-        bool dualBuffer = true;
+  // Match any matmul-like contraction, not a specific named op: transpose-b is
+  // carried by indexing_maps on a `linalg.matmul` (the sample) or on the
+  // `linalg.generic` a StableHLO `dot_general` legalizes to -- both are
+  // contractions. Per-shape tiling comes from the config table (keyed by the
+  // dispatch symbol, which encodes MxNxK); absent an entry the tiles default to 0.
+  auto linalgOp = dyn_cast<linalg::LinalgOp>(rootOp);
+  if (!linalgOp || !linalg::isaContractionOpInterface(linalgOp))
+    return success();
 
-        applyConfigTable(funcOp.getName(), configTable, workgroupTiles, l1Tiles,
-                         l1Interchange, dualBuffer);
+  SmallVector<int64_t> workgroupTiles(3, 0);
+  SmallVector<int64_t> l1Tiles(3, 0);
+  SmallVector<int64_t> l1Interchange = {2, 0, 1};
+  bool dualBuffer = true;
 
-        setLoweringConfig(rootOp, quidditch::Snitch::LoweringConfigAttr::get(
-                                      rootOp->getContext(), workgroupTiles,
-                                      l1Tiles, l1Interchange, dualBuffer));
-        return success();
-      })
-      .Default(success());
+  applyConfigTable(funcOp.getName(), configTable, workgroupTiles, l1Tiles,
+                   l1Interchange, dualBuffer);
+
+  setLoweringConfig(rootOp, quidditch::Snitch::LoweringConfigAttr::get(
+                                rootOp->getContext(), workgroupTiles, l1Tiles,
+                                l1Interchange, dualBuffer));
+  return success();
 }
 
 void ConfigureForSnitch::runOnOperation() {
