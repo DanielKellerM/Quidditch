@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# StableHLO front-door regression gate: prove that compiling the gemm from a bare
-# StableHLO input (gemm_square.stablehlo.mlir, no baked lowering_config, tiling
-# selected from gemm_square_config.json) yields a device object byte-identical to
-# the hand-tuned linalg sample (gemm_square.mlir). Uses --compile-to=hal, so no
+# StableHLO front-door regression gate: for each gemm shape, prove that compiling
+# from a bare StableHLO input (no baked lowering_config, tiling selected from
+# gemm_square_config.json keyed by the dispatch symbol) yields a device object
+# byte-identical to the hand-tuned linalg sample. Uses --compile-to=hal, so no
 # IREE VM/EmitC host module is emitted -- the deployment path for the minimal host.
 set -euo pipefail
 
@@ -12,6 +12,12 @@ XDSL_OPT=${QUIDDITCH_XDSL_OPT:?set QUIDDITCH_XDSL_OPT to the xdsl-opt path}
 TOOLCHAIN_ROOT=${QUIDDITCH_TOOLCHAIN_ROOT:?set QUIDDITCH_TOOLCHAIN_ROOT}
 CFG_HEADER=${QUIDDITCH_CFG_HEADER:?set QUIDDITCH_CFG_HEADER to the snitch_cluster_cfg.h path}
 OBJDUMP=${QUIDDITCH_OBJDUMP:?set QUIDDITCH_OBJDUMP to a Snitch llvm-objdump}
+
+# (StableHLO sample, linalg reference) pairs to check.
+PAIRS=(
+  "gemm_square.stablehlo.mlir gemm_square.mlir"
+  "gemm_square_4x4.stablehlo.mlir gemm_square_4x4.mlir"
+)
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -33,14 +39,17 @@ norm() { "$OBJDUMP" -d --mattr=+xdma,+xssr,+xfrep "$1" \
            | grep -vE 'file format|^/|:[[:space:]]*$' \
            | sed -E 's/^[0-9a-f ]+://; s/matmul_like/matmul/g'; }
 
-compile "$HERE/gemm_square.mlir"            "$WORK/linalg.o"
-compile "$HERE/gemm_square.stablehlo.mlir"  "$WORK/stablehlo.o" \
-        --iree-quidditch-config-table="$HERE/gemm_square_config.json"
-
-if diff <(norm "$WORK/linalg.o") <(norm "$WORK/stablehlo.o") >/dev/null; then
-  echo "PASS: StableHLO front-door device object is byte-identical to the linalg sample"
-else
-  echo "FAIL: StableHLO front-door diverged from the linalg sample" >&2
-  diff <(norm "$WORK/linalg.o") <(norm "$WORK/stablehlo.o") | head >&2
-  exit 1
-fi
+rc=0
+for pair in "${PAIRS[@]}"; do
+  read -r shlo linalg <<<"$pair"
+  compile "$HERE/$linalg" "$WORK/linalg.o"
+  compile "$HERE/$shlo"   "$WORK/shlo.o" --iree-quidditch-config-table="$HERE/gemm_square_config.json"
+  if diff <(norm "$WORK/linalg.o") <(norm "$WORK/shlo.o") >/dev/null; then
+    echo "PASS: $shlo == $linalg (byte-identical device object)"
+  else
+    echo "FAIL: $shlo diverged from $linalg" >&2
+    diff <(norm "$WORK/linalg.o") <(norm "$WORK/shlo.o") | head >&2
+    rc=1
+  fi
+done
+exit $rc
