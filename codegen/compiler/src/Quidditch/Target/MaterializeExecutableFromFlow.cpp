@@ -71,7 +71,7 @@ rewriteFuncInterface(func::FuncOp funcOp,
   OpBuilder builder = OpBuilder::atBlockBegin(&entry);
   Value zero =
       arith::ConstantIndexOp::create(builder, funcOp.getLoc(), 0).getResult();
-  IntegerAttr align64 = builder.getI64IntegerAttr(64);
+  IntegerAttr align64 = builder.getIndexAttr(64);
 
   int64_t bindingOrdinal = 0;
   int64_t constantOrdinal = 0;
