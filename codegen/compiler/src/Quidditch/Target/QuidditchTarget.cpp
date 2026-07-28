@@ -53,6 +53,11 @@
 #include "LibraryBuilder.h"
 #include "Passes.h"
 
+namespace quidditch {
+#define GEN_PASS_REGISTRATION
+#include "Quidditch/Target/Passes.h.inc"
+} // namespace quidditch
+
 using namespace mlir;
 using namespace mlir::iree_compiler;
 using namespace quidditch::Snitch;
@@ -835,6 +840,10 @@ public:
     // input IR without just being parsed as an 'OpaqueAttr'.
     registry.insert<quidditch::Snitch::QuidditchSnitchDialect>();
   }
+
+  // Expose the target passes (e.g. quidditch-materialize-executable-from-flow) to
+  // iree-opt-style drivers that build pipelines textually.
+  static void registerPasses() { quidditch::registerPasses(); }
 
 private:
   void populateHALTargetDevices(IREE::HAL::TargetDeviceList &targets) override {
