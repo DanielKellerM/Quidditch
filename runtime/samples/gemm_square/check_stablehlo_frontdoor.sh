@@ -7,11 +7,11 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+source "$HERE/gate_lib.sh"
 IREE_COMPILE=${QUIDDITCH_IREE_COMPILE:?set QUIDDITCH_IREE_COMPILE to the iree-compile path}
 XDSL_OPT=${QUIDDITCH_XDSL_OPT:?set QUIDDITCH_XDSL_OPT to the xdsl-opt path}
 TOOLCHAIN_ROOT=${QUIDDITCH_TOOLCHAIN_ROOT:?set QUIDDITCH_TOOLCHAIN_ROOT}
 CFG_HEADER=${QUIDDITCH_CFG_HEADER:?set QUIDDITCH_CFG_HEADER to the snitch_cluster_cfg.h path}
-OBJDUMP=${QUIDDITCH_OBJDUMP:?set QUIDDITCH_OBJDUMP to a Snitch llvm-objdump}
 
 # (StableHLO sample, linalg reference) pairs to check.
 PAIRS=(
@@ -33,11 +33,6 @@ compile() { # <in.mlir> <out.o> [extra flags...]
     "${@:3}" \
     --compile-to=hal "$1" -o /dev/null
 }
-
-# Strip addresses + the objdump file-header lines; matmul_like is the same op as matmul.
-norm() { "$OBJDUMP" -d --mattr=+xdma,+xssr,+xfrep "$1" \
-           | grep -vE 'file format|^/|:[[:space:]]*$' \
-           | sed -E 's/^[0-9a-f ]+://; s/matmul_like/matmul/g'; }
 
 rc=0
 for pair in "${PAIRS[@]}"; do
