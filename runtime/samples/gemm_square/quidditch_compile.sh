@@ -33,7 +33,12 @@ qflags=(--iree-quidditch-xdsl-opt-path="$XDSL_OPT"
         --iree-quidditch-cluster-cfg-header="$CFG_HEADER"
         --iree-quidditch-config-table="$CONFIG_TABLE")
 
-TAIL='builtin.module(quidditch-materialize-executable-from-flow, hal.executable(iree-hal-configure-executables, iree-hal-translate-all-executables, iree-hal-serialize-all-executables))'
+# quidditch-link-executables (module-level) merges per-dispatch executables into one
+# before serialize -- a no-op for a single executable, required for more than one. NB:
+# multi-dispatch binding offsets are 0 here (separate-buffer semantics); IREE's Stream
+# assigns packed offsets, which the Stream-free path does not reproduce -- so a
+# multi-dispatch program links correctly but is not byte-identical to the full path.
+TAIL='builtin.module(quidditch-materialize-executable-from-flow, hal.executable(iree-hal-configure-executables, iree-hal-translate-all-executables), quidditch-link-executables, hal.executable(iree-hal-serialize-all-executables))'
 
 # quidditch_compile <input.stablehlo.mlir> <out.o>
 quidditch_compile() {

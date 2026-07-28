@@ -136,15 +136,15 @@ int main(int argc, char **argv) {
       IREEVMPipelinePhase::Start, IREEVMPipelinePhase::Flow);
 
   // Stage 2: Flow -> device object (serialize writes the .o via the plugin flag).
-  // One flow.executable per dispatch: single-dispatch programs (incl. any binding
-  // count) are byte-exact. Multi-dispatch programs need HAL executable linking, which
-  // the Quidditch link pass only performs correctly inside the full pipeline -- not yet
-  // wired here (tracked in GOAL.md).
+  // quidditch-link-executables (module-level) merges the per-dispatch executables into
+  // one before serialize -- a no-op for a single executable, required for more than one.
   pm.addPass(quidditch::createMaterializeExecutableFromFlowPass());
-  auto &executablePM = pm.nest<IREE::HAL::ExecutableOp>();
-  executablePM.addPass(IREE::HAL::createConfigureExecutablesPass());
-  executablePM.addPass(IREE::HAL::createTranslateAllExecutablesPass());
-  executablePM.addPass(IREE::HAL::createSerializeAllExecutablesPass());
+  auto &translatePM = pm.nest<IREE::HAL::ExecutableOp>();
+  translatePM.addPass(IREE::HAL::createConfigureExecutablesPass());
+  translatePM.addPass(IREE::HAL::createTranslateAllExecutablesPass());
+  pm.addPass(quidditch::createLinkExecutablesPass());
+  pm.nest<IREE::HAL::ExecutableOp>().addPass(
+      IREE::HAL::createSerializeAllExecutablesPass());
 
   if (failed(pm.run(*module)))
     return 1;
