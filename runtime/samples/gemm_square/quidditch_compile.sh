@@ -64,7 +64,7 @@ case "${1:-}" in
                | grep -vE 'file format|^/|:[[:space:]]*$' \
                | sed -E 's/^[0-9a-f ]+://; s/matmul_like/matmul/g'; }
     rc=0
-    for shlo in gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir; do
+    for shlo in gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir gemm_bias.stablehlo.mlir; do
       "$IREE_COMPILE" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
         --iree-hal-target-backends=quidditch "${qflags[@]}" \
         --iree-quidditch-static-library-output-path="$WORK/full.o" \
@@ -90,7 +90,7 @@ case "${1:-}" in
                | grep -vE 'file format|^/|:[[:space:]]*$' \
                | sed -E 's/^[0-9a-f ]+://; s/matmul_like/matmul/g'; }
     rc=0
-    for shlo in gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir; do
+    for shlo in gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir gemm_bias.stablehlo.mlir; do
       "$IREE_COMPILE" --iree-input-type=auto --iree-input-demote-f64-to-f32=0 \
         --iree-hal-target-backends=quidditch "${qflags[@]}" \
         --iree-quidditch-static-library-output-path="$WORK/full.o" \

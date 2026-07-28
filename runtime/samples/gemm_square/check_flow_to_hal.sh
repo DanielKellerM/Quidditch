@@ -18,7 +18,7 @@ TOOLCHAIN_ROOT=${QUIDDITCH_TOOLCHAIN_ROOT:?set QUIDDITCH_TOOLCHAIN_ROOT}
 CFG_HEADER=${QUIDDITCH_CFG_HEADER:?set QUIDDITCH_CFG_HEADER to the snitch_cluster_cfg.h path}
 OBJDUMP=${QUIDDITCH_OBJDUMP:?set QUIDDITCH_OBJDUMP to a Snitch llvm-objdump}
 
-SHAPES=(gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir)
+SHAPES=(gemm_square.stablehlo.mlir gemm_square_4x4.stablehlo.mlir gemm_bias.stablehlo.mlir)
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
