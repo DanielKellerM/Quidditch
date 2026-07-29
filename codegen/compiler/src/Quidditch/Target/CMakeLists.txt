@@ -25,6 +25,7 @@ iree_cc_library(
         "ConfigureForSnitch.cpp"
         "DisableQuidditchVariant.cpp"
         "LinkExecutables.cpp"
+        "MaterializeExecutableFromFlow.cpp"
         "PadToTilingConfig.cpp"
         "ReluToMax.cpp"
         "RemoveTrivialLoops.cpp"
@@ -34,9 +35,13 @@ iree_cc_library(
         Quidditch::Conversion::ConvertSnitchToLLVM
         Quidditch::Conversion::ConvertDMAToLLVM
         Quidditch::Dialect::Snitch::IR::QuidditchSnitchDialect
+        MLIRArithDialect
         MLIRFuncDialect
         MLIRIR
+        iree::compiler::Dialect::Flow::IR
         iree::compiler::Dialect::HAL::IR
+        iree::compiler::Dialect::TensorExt::IR
+        iree::compiler::Dialect::Util::IR
 )
 
 iree_cc_library(

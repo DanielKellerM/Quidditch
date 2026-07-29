@@ -3,6 +3,17 @@
 
 include "mlir/Pass/PassBase.td"
 
+def MaterializeExecutableFromFlowPass
+    : Pass<"quidditch-materialize-executable-from-flow", "mlir::ModuleOp"> {
+  let description = [{
+    Materializes `hal.executable`s directly from `flow.executable`s, skipping the
+    Stream dialect: the Stream-free path to HAL device codegen. Reproduces the
+    binding/workgroup interface that Stream + HAL::MaterializeInterfaces produce,
+    sourced from Flow (dispatch funcs take `dispatch.tensor` args directly). Host
+    dispatch callers are dropped -- this is a device-only compiler.
+  }];
+}
+
 def LinkExecutablesPass : Pass<"quidditch-link-executables", "mlir::ModuleOp"> {
   let description = [{
     Combines all `hal.executable.variant`s of the same target into a single
