@@ -49,8 +49,8 @@ bindingForArg(MLIRContext *ctx, Type argType, Location loc) {
   if (!dtType)
     return failure();
   if (!dtType.hasStaticShape())
-    return emitError(loc, "dynamic-shape dispatch tensors are not yet supported by "
-                          "the Flow->HAL materialization (needs dynamic-dim threading)");
+    return emitError(loc, "dynamic-shape dispatch tensors are unsupported: the Snitch "
+                          "codegen (pad-to-tiling-config) requires static shapes");
   auto flags = IREE::HAL::DescriptorFlags::Indirect;
   if (dtType.getAccess() == IREE::TensorExt::TensorAccess::ReadOnly)
     flags = flags | IREE::HAL::DescriptorFlags::ReadOnly;
