@@ -18,11 +18,6 @@ using namespace mlir;
 using namespace mlir::iree_compiler;
 
 namespace {
-// Materialize `hal.executable`s directly from `flow.executable`s, skipping the
-// Stream dialect. This is the Stream-free path to the HAL device-codegen: it
-// reproduces exactly the binding/workgroup interface that Stream +
-// HAL::MaterializeInterfaces would produce, but sourced from Flow (whose dispatch
-// funcs take `dispatch.tensor` args directly rather than `stream.binding`s).
 class MaterializeExecutableFromFlow
     : public quidditch::impl::MaterializeExecutableFromFlowPassBase<
           MaterializeExecutableFromFlow> {
@@ -47,8 +42,7 @@ gatherExecutableTargets(ModuleOp moduleOp) {
                                                       targets.end());
 }
 
-// The pipeline binding for one dispatch.tensor arg: a storage buffer whose flags
-// mirror the access. All bindings are Indirect (the standard HAL ABI).
+// The storage-buffer pipeline binding for one dispatch.tensor arg; flags mirror access.
 static FailureOr<IREE::HAL::PipelineBindingAttr>
 bindingForArg(MLIRContext *ctx, Type argType, Location loc) {
   auto dtType = dyn_cast<IREE::TensorExt::DispatchTensorType>(argType);
@@ -64,9 +58,7 @@ bindingForArg(MLIRContext *ctx, Type argType, Location loc) {
       ctx, IREE::HAL::DescriptorType::StorageBuffer, flags);
 }
 
-// Rewrite a cloned dispatch func so its dispatch.tensor args become
-// hal.interface.binding.subspan loads and non-tensor args become
-// hal.interface.constant.load push constants.
+// Rewrite dispatch.tensor args to binding.subspan and non-tensor args to constant.load.
 static LogicalResult
 rewriteFuncInterface(func::FuncOp funcOp,
                      IREE::HAL::PipelineLayoutAttr layoutAttr) {
@@ -142,8 +134,11 @@ void MaterializeExecutableFromFlow::runOnOperation() {
            flowExe.getBlock().getOps<IREE::Flow::ExecutableExportOp>()) {
         func::FuncOp srcFunc =
             innerModule.lookupSymbol<func::FuncOp>(flowExport.getFunctionRef());
-        if (!srcFunc)
+        if (!srcFunc) {
+          flowExport.emitError("export references missing function '")
+              << flowExport.getFunctionRef() << "'";
           return signalPassFailure();
+        }
 
         // Derive the pipeline layout from the dispatch func signature.
         SmallVector<IREE::HAL::PipelineBindingAttr> bindings;
