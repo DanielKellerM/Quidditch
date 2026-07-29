@@ -54,6 +54,9 @@ bindingForArg(MLIRContext *ctx, Type argType, Location loc) {
   auto dtType = dyn_cast<IREE::TensorExt::DispatchTensorType>(argType);
   if (!dtType)
     return failure();
+  if (!dtType.hasStaticShape())
+    return emitError(loc, "dynamic-shape dispatch tensors are not yet supported by "
+                          "the Flow->HAL materialization (needs dynamic-dim threading)");
   auto flags = IREE::HAL::DescriptorFlags::Indirect;
   if (dtType.getAccess() == IREE::TensorExt::TensorAccess::ReadOnly)
     flags = flags | IREE::HAL::DescriptorFlags::ReadOnly;
@@ -78,10 +81,7 @@ rewriteFuncInterface(func::FuncOp funcOp,
   for (BlockArgument arg : entry.getArguments()) {
     auto dtType = dyn_cast<IREE::TensorExt::DispatchTensorType>(arg.getType());
     if (dtType) {
-      if (!dtType.hasStaticShape())
-        return funcOp.emitError(
-            "dynamic-shape dispatch tensors are not yet supported by the "
-            "Flow->HAL materialization (needs dynamic-dim threading)");
+      // Static-shape already enforced during layout derivation (bindingForArg).
       auto bindingAttr = layoutAttr.getBinding(bindingOrdinal);
       auto subspan = IREE::HAL::InterfaceBindingSubspanOp::create(
           builder, arg.getLoc(), arg.getType(), layoutAttr,
