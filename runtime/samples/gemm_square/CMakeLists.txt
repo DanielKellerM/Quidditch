@@ -42,3 +42,21 @@ target_link_libraries(
     snRuntime
     Quidditch::dispatch::dispatch
 )
+
+# PyTorch MLP front-door (beyond gemm): 2-dispatch model for the on-device
+# multi-dispatch harness. Compiled from the torch_xla-exported StableHLO.
+quidditch_module(
+    SRC torch_mlp.stablehlo.mlir
+    DST mlp_mod
+    ASSERT_XDSL
+    FLAGS --iree-quidditch-config-table=${CMAKE_CURRENT_SOURCE_DIR}/mlp_config.json
+)
+
+add_executable(mlp_harness mlp_harness.c)
+target_link_libraries(
+    mlp_harness
+    PRIVATE
+    mlp_mod
+    snRuntime
+    Quidditch::dispatch::dispatch
+)

@@ -49,10 +49,27 @@ iree-run-module --module=mlp_cpu.vmfb --function=main \
 # -> [SUCCESS] all function outputs matched their expected values.
 ```
 
+## On-device multi-dispatch validation (single Snitch cluster)
+
+`mlp_harness.c` runs the two dispatches back-to-back on one cluster (no IREE VM/HAL),
+threading dispatch_0's output `h1` into dispatch_1's input. The compute cores run the
+real f64 kernels; the DM core (no fp ARITHMETIC) seeds the actual torch weights as f64
+bit patterns (`mlp_ref_bits.h`) via integer stores and dumps the fp output, which
+`compare_mlp.py` tolerance-checks against the torch golden (`mlp_golden.npy`). Build the
+`mlp_harness` target and run it on `snitch_cluster.vlt`; then:
+`compare_mlp.py <sim.log> mlp_golden.npy`.
+
+Verified on the Verilator single-cluster sim, all 8 compute cores identical per the
+per-hart traces: FPU (520 fp-offload ops/core), SSR (enable + config CSRs), FREP
+(sequencer loops), double buffering (`dual_buffer=true`) — and the device output matches
+the torch golden to **1.1e-16** (f64 last-bit), 0 mismatches across all 16 rows.
+
 ## Remaining toward on-gwaihir deployment
 
-- On-device numerics for the Snitch `.o` (single-cluster Verilator harness, like gemm).
-- Multi-dispatch sequencing on the QCS host: a model issues N sequential dispatches with
-  intermediate L2 buffers; gemm was one kernel.
-- Per-dispatch tiling is hand-written today; a real model wants a ConfigureForSnitch default.
+- Run the same multi-dispatch flow on the full gwaihir SoC via nimbus (QCS command
+  stream sequencing the 2 dispatches; the single-cluster harness above proves the compute).
+- Per-dispatch tiling is hand-written (`mlp_config.json`); a real model wants a
+  ConfigureForSnitch default.
 - Broader ops (softmax/conv/layernorm) + non-16×16 shapes, each gated by xDSL coverage.
+- Double buffering is clean on the standalone cluster; on the gwaihir SoC it is blocked by
+  the parked Cheshire-AXI duplicate-R-last bug (single-buffered runs clean there).
