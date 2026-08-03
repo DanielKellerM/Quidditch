@@ -108,23 +108,34 @@ minimal IREE dependence (IREE is being sunset).
 ## Not now (explicitly deferred)
 - Async pipelining / command-buffer caching.
 - A second (non-Snitch) ISA backend.
-- [DEFERRED, reframed] "Fully cut Flow/HAL to drop IREE." A multi-agent validation (8 agents,
-  both adversarial judges agreed on the facts) found the hypothesis "drop IREE => simpler infra +
-  smaller code + no DRAM" does NOT hold on its own terms: (no-DRAM) ALREADY-MET host-side by the
-  host-VM excision + Nimbus split, orthogonal to the device Flow/HAL cut (device wakes+computes
-  identically from SPM and DRAM); (smaller-code) mostly ALREADY banked by S1/S2 + Nimbus, and the
-  device .o is byte-identical BY DESIGN so it cannot shrink -- only a modest compiler-binary shrink
-  remains; (simpler-infra) FALSE -- the cut sheds only Flow::IR + HAL::Target while HAL::IR (a DIRECT
-  dep of Codegen::Common/LLVMCPU) + the whole IREE Codegen backend (comprehensive bufferization,
-  MaterializeUserConfigs, ReconcileTranslationInfo, HALDispatchABI, tile-to-workgroups) stay linked,
-  and A-D would ADD ~3000 owned LOC (byte-exact HALDispatchABI reimpl, a Quidditch dialect for the 6
-  hal.interface ops, an executable container, forked Codegen passes) at ~3-6 person-months to emit
-  the identical .o. "Cut Flow/HAL" != "drop IREE". Reframe: the three stated goals are DONE; the one
-  real reduction taken (collapse the dual byte-exact producer to one, above). Full A-D belongs to a
-  SEPARATELY-chartered "sunset IREE decoupling" project judged on the IREE-independence north-star,
-  NOT these three goals -- sequence C(container)->B(HALDispatchABI)->A/D behind the byte-exact gate.
-  Counter-weight: DEFER != abandon -- if upstream IREE moves/deletes the TargetBackend/compile-to=flow
-  surfaces the plugin overrides, revisit before it becomes a forced emergency migration.
+- [CHARTERED, not started -- trigger-gated] Sunset-IREE decoupling. Make the Snitch codegen
+  independent of IREE's Flow/HAL DIALECTS. Judged on the IREE-independence north-star ONLY, never on
+  "no-DRAM / smaller-code / simpler-infra": a 2026-08 8-agent validation (both adversarial judges
+  concurring) found those three ALREADY-MET or mis-attributed, and the cut infra-NEGATIVE short-term --
+  it sheds only Flow::IR + HAL::Target while HAL::IR (a DIRECT dep of Codegen::Common/LLVMCPU) + the
+  IREE Codegen backend stay linked, and it ADDS ~3000 owned LOC to emit the byte-identical .o. Do NOT
+  sell this on those goals; "cut Flow/HAL" != "drop IREE".
+  - Scope IN: own (i) the executable/variant/export container + a plain translate driver, (ii) the
+    interface-ABI ops + their LLVM lowering, (iii) the target/config attr, (iv) dispatch-formation -- so
+    quidditch-compile links no Flow::IR/HAL::IR/HAL::Target and needs no IREE TargetBackend/compile-to=flow.
+  - Scope OUT ("minimal IREE"): the dialect-agnostic Codegen libs (comprehensive bufferization,
+    MaterializeUserConfigs, tile-to-workgroups, ...) and the MLIR/LLVM build stay reused.
+  - Invariant: the device .o stays BYTE-IDENTICAL at every step. FIRST action: freeze a golden .o per
+    gate shape and gate each stage against the frozen bytes -- the moving full_hal reference itself
+    breaks as HAL is cut. Gate = runtime/samples/gemm_square/quidditch_compile.sh check.
+  - Sequence (each byte-exact-gated): C own the container + Configure/Translate/Serialize/Link driver
+    (already ~half-done in tools/quidditch-compile.cpp) -> B reimplement IREE's HALDispatchABI dispatch-arg
+    struct ABI byte-exact + a Quidditch dialect for the 6 hal.interface.* ops (HARDEST, ~4-8 wk, highest
+    ABI-drift risk; the ctest gate catches drift but doesn't make it cheap) -> A own the target/config attr
+    (ExecutableTargetAttr, 5+ read sites) -> D own dispatch-formation, deleting the sole Flow pass
+    (MaterializeExecutableFromFlow, ~213 LOC = the entire Flow surface).
+  - Payoff honesty: the compiler-binary shrink FULLY materializes only if Codegen::Common/LLVMCPU are
+    ALSO forked off their direct HAL::IR dep; otherwise the win is just Flow::IR + HAL::Target/Utils.
+  - Cost: ~3-6 person-months, ~3000 owned LOC.
+  - START TRIGGER (defer != abandon): goes ACTIVE on a concrete upstream-sunset signal -- IREE
+    moves/deletes the HAL TargetBackend/TargetDevice base classes the plugin subclasses, or changes the
+    --compile-to=flow front-door -- before deferral becomes a forced emergency migration. Check for that
+    signal on every IREE gitlink bump.
 - [PARKED, owner=Luca] gwaihir Cheshire-AXI duplicate-R-last bug (colluca/axi): concurrent/
   double-buffered reads through the wide→narrow DW downsizer re-accept the terminal R beat →
   AR id-counter underflow ($fatal). Blocks double-buffering + small tiles on the 16-cluster RTL
