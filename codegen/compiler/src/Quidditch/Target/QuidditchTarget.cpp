@@ -20,6 +20,8 @@
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Dialect/SCF/Transforms/Passes.h"
+#include "mlir/IR/Diagnostics.h"
+#include "mlir/IR/Location.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
@@ -141,6 +143,9 @@ struct ClusterParams {
   int64_t l1Base = 0x10000000;
   int64_t l1ZeroMemBase = 0x10030000;
   int64_t l1ZeroMemSize = 0x10000;
+  // Provenance of the addrmap above: warns when a cfg header didn't drive it (silent-occamy trap).
+  enum class CfgSource { NoHeader, Unreadable, MissingAddrmap, FromCfg };
+  CfgSource cfgSource = CfgSource::NoHeader;
 };
 
 static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
@@ -149,9 +154,12 @@ static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
     return p;
   llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buf =
       llvm::MemoryBuffer::getFile(headerPath);
-  if (!buf)
+  if (!buf) {
+    p.cfgSource = ClusterParams::CfgSource::Unreadable;
     return p;
+  }
   StringRef text = (*buf)->getBuffer();
+  p.cfgSource = ClusterParams::CfgSource::MissingAddrmap; // upgraded to FromCfg iff QUIDDITCH_L1_BASE is present
   std::optional<int64_t> nr = cfgHeaderDefine(text, "CFG_CLUSTER_NR_CORES");
   std::optional<int64_t> dm = cfgHeaderDefine(text, "SNRT_CLUSTER_DM_CORE_NUM");
   if (nr)
@@ -169,8 +177,10 @@ static ClusterParams clusterParamsFromCfgHeader(StringRef headerPath) {
   p.supportsSSR = cfgHeaderDefined(text, "SNRT_SUPPORTS_SSR");
   p.supportsFREP = cfgHeaderDefined(text, "SNRT_SUPPORTS_FREP");
   p.supportsDivSqrt = cfgHeaderDefined(text, "SNRT_SUPPORTS_DIVSQRT");
-  if (std::optional<int64_t> b = cfgHeaderDefine(text, "QUIDDITCH_L1_BASE"))
+  if (std::optional<int64_t> b = cfgHeaderDefine(text, "QUIDDITCH_L1_BASE")) {
     p.l1Base = *b;
+    p.cfgSource = ClusterParams::CfgSource::FromCfg;
+  }
   if (std::optional<int64_t> b = cfgHeaderDefine(text, "QUIDDITCH_L1_ZERO_MEM_BASE"))
     p.l1ZeroMemBase = *b;
   if (std::optional<int64_t> s = cfgHeaderDefine(text, "QUIDDITCH_L1_ZERO_MEM_SIZE"))
@@ -310,6 +320,15 @@ public:
     // cfg but NOT emitted until their consumers land; each is re-added here together
     // with its consumer (TODO(cfg-target) on ClusterParams + CFG_DRIVEN_TARGET.md).
     ClusterParams cp = clusterParamsFromCfgHeader(targetOptions.clusterCfgHeader);
+    // Loud when a cfg header was passed but didn't drive the L1 addrmap: it silently fell back to occamy (drift trap). No header = legitimate upstream default.
+    if (cp.cfgSource == ClusterParams::CfgSource::Unreadable ||
+        cp.cfgSource == ClusterParams::CfgSource::MissingAddrmap)
+      emitWarning(UnknownLoc::get(context))
+          << "cluster cfg header '" << targetOptions.clusterCfgHeader
+          << (cp.cfgSource == ClusterParams::CfgSource::Unreadable
+                  ? "' is unreadable"
+                  : "' lacks QUIDDITCH_L1_BASE")
+          << "; falling back to the occamy addrmap (l1_base=0x10000000)";
     IntegerType i32 = IntegerType::get(context, 32);
     list.append("compute_cores", IntegerAttr::get(i32, cp.computeCores));
     // Cluster L1/TCDM base + zero-memory region. CONSUMED by the LLVM lowering
