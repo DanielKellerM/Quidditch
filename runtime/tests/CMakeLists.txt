@@ -86,3 +86,16 @@ test_executable(big_matvec NIGHTLY)
 test_executable(gemm_square NIGHTLY)
 test_executable(NsNet2 NIGHTLY)
 test_executable(NsNet2LLVM NIGHTLY)
+
+# StableHLO front-door byte-exact gate: the kernel object compiled from a bare
+# StableHLO input (tiling selected from the config table, no baked lowering_config)
+# must be byte-identical to the linalg reference. Diffs the built objects.
+set(_gemm_dir ${CMAKE_SOURCE_DIR}/samples/gemm_square)
+set(_gemm_bin ${CMAKE_BINARY_DIR}/samples/gemm_square)
+add_test(NAME stablehlo_frontdoor_16x16
+    COMMAND ${_gemm_dir}/assert_byte_identical.sh
+            ${_gemm_bin}/gemm_mod/gemm_mod.o
+            ${_gemm_bin}/gemm_stablehlo_mod/gemm_stablehlo_mod.o)
+set_tests_properties(stablehlo_frontdoor_16x16 PROPERTIES
+    LABELS precommit
+    ENVIRONMENT "QUIDDITCH_OBJDUMP=${QUIDDITCH_TOOLCHAIN_ROOT}/bin/llvm-objdump")

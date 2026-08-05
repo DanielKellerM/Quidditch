@@ -1,0 +1,4 @@
+{
+  "main_dispatch_0_matmul_16x16x16_f64": {"l1_tiles": [8,8,8], "l1_tiles_interchange": [2,0,1], "dual_buffer": true},
+  "main_dispatch_1_matmul_16x16x16_f64": {"l1_tiles": [8,8,8], "l1_tiles_interchange": [2,0,1], "dual_buffer": true}
+}
