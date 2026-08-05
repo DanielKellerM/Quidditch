@@ -29,10 +29,10 @@
 #define N 16
 typedef double elem_t;
 
+// L1 scratch for a dispatch's tiles (double-buffered); guarded vs attrs.local_memory_pages below.
 #define LOCAL_MEMORY_BYTES (32 * 1024)
 static iree_alignas(64) uint8_t g_local_memory[LOCAL_MEMORY_BYTES];
 static iree_hal_executable_environment_v0_t g_env;
-static char g_dump[N * N * 17 + 1];
 
 static int run_dispatch(const quidditch_executable_library_v0_t* lib, int ordinal,
                         void** bptrs, size_t* blens, int nb) {
@@ -112,21 +112,29 @@ int main(void) {
   quidditch_dispatch_quit();
   if (rc) return rc;
 
-  // Dump y as f64 bit patterns (integer hex, no fp) in ONE buffered print; strided so
-  // the full 16 rows are covered without flooding the sim console. compare_mlp.py reads
-  // the stride and checks vs golden[::stride].
+  // Dump y as f64 bit patterns (integer hex, no fp), strided so 4 runs (offsets 0..3)
+  // cover all 256 one short line at a time (a giant printf corrupts on some tb UARTs).
 #define YSTRIDE 4
+#ifndef YOFFSET
+#define YOFFSET 0
+#endif
+  // Non-hex sacrificial lines FIRST: some tb UARTs eat the first ~line at the burst
+  // start, so they absorb it and the trusted YDUMP_BEGIN header + values print clean.
+  printf("________________\n");
+  printf("________________\n");
+  printf("[MLP] dispatch_cycles=%u YDUMP_BEGIN stride=%d offset=%d\n", t1 - t0, YSTRIDE,
+         YOFFSET);
   const uint64_t* u = (const uint64_t*)y;
-  char* p = g_dump;
-  for (int i = 0; i < N * N; i += YSTRIDE) {
+  char line[18];
+  for (int i = YOFFSET; i < N * N; i += YSTRIDE) {
     for (int nib = 15; nib >= 0; nib--) {
       int v = (int)((u[i] >> (nib * 4)) & 0xf);
-      *p++ = (char)(v < 10 ? '0' + v : 'a' + v - 10);
+      line[15 - nib] = (char)(v < 10 ? '0' + v : 'a' + v - 10);
     }
-    *p++ = '\n';
+    line[16] = '\n';
+    line[17] = '\0';
+    printf("%s", line);
   }
-  *p = '\0';
-  printf("[MLP] dispatch_cycles=%u YDUMP_BEGIN stride=%d\n%s[MLP] YDUMP_END\n", t1 - t0,
-         YSTRIDE, g_dump);
+  printf("[MLP] YDUMP_END\n");
   return 0;
 }

@@ -12,7 +12,7 @@ matmul dispatches, and the xDSL backend streamifies each (SSR/FREP).
 PyTorch nn.Module
   → torch.export + torch_xla.stablehlo   (StableHLO text; see export_mlp.py)
   → iree-compile --iree-input-type=auto --iree-hal-target-backends=quidditch
-        --iree-quidditch-cluster-cfg-header=<gwaihir snitch_cluster_cfg.h>   (L1_BASE=0x30000000)
+        --iree-quidditch-cluster-cfg-header=<gwaihir snitch_cluster_cfg.h>   (L1 base from QUIDDITCH_L1_BASE)
         --iree-quidditch-config-table=<per-dispatch tiling>
         --compile-to=hal --iree-quidditch-static-library-output-path=mlp.o
   → mlp.o : per-layer matmul_16x16x16 dispatches, each $xdsl_kernel* (streamed)
@@ -32,8 +32,11 @@ apptainer exec --bind /scratch/<you> docker://python:3.11-slim bash -c '
   PJRT_DEVICE=CPU /scratch/<you>/cvenv/bin/python export_mlp.py'
 ```
 
-`export_mlp.py` emits `torch_mlp.stablehlo.mlir` plus a numerical reference
-(`mlp_ref.h`, and `mlp_in{0..4}_*.npy` / `mlp_golden.npy` in @main binding order).
+`export_mlp.py` (deterministic — `manual_seed`, so the reference is regenerable) emits
+`torch_mlp.stablehlo.mlir`, the harness weight header `mlp_ref_bits.h`, and
+`mlp_in{0..4}_*.npy` / `mlp_golden.npy` in @main binding order. It self-checks that the
+emitted bit-pattern weights recompute the golden, so the committed pair can't drift.
+`MLP_OUT` overrides the output dir (defaults to this sample dir).
 
 ## Numerical validation (CPU reference)
 
@@ -56,20 +59,24 @@ threading dispatch_0's output `h1` into dispatch_1's input. The compute cores ru
 real f64 kernels; the DM core (no fp ARITHMETIC) seeds the actual torch weights as f64
 bit patterns (`mlp_ref_bits.h`) via integer stores and dumps the fp output, which
 `compare_mlp.py` tolerance-checks against the torch golden (`mlp_golden.npy`). Build the
-`mlp_harness` target and run it on `snitch_cluster.vlt`; then:
-`compare_mlp.py <sim.log> mlp_golden.npy`.
+`mlp_harness` target and run it on `snitch_cluster.vlt` (once per `YOFFSET` 0..3 for full
+coverage); then: `compare_mlp.py mlp_golden.npy <sim.log> [more sim.logs...]`.
 
 Verified on the Verilator single-cluster sim, all 8 compute cores identical per the
 per-hart traces: FPU (520 fp-offload ops/core), SSR (enable + config CSRs), FREP
 (sequencer loops), double buffering (`dual_buffer=true`) — and the device output matches
 the torch golden to **1.1e-16** (f64 last-bit), 0 mismatches across all 16 rows.
 
-## Remaining toward on-gwaihir deployment
+## On the full gwaihir SoC (headless, no CVA6 host)
 
-- Run the same multi-dispatch flow on the full gwaihir SoC via nimbus (QCS command
-  stream sequencing the 2 dispatches; the single-cluster harness above proves the compute).
+Done via nimbus: `gen_qcs_offload_image.py` derives a QCS job (2 dispatches, h1 threaded
+between them) from the model's Flow IR, and the parametrized `qcs_replay` firmware replays
+it on the SoC RTL under PRELMODE=5. Result: `done=144/144 fail=0`, output `y` byte-exact vs
+the torch golden (max_abs_err 1.7e-16). Single-buffered on the SoC (double buffering is
+blocked there by the parked Cheshire-AXI duplicate-R-last bug; clean on the standalone cluster).
+
+## Remaining
+
 - Per-dispatch tiling is hand-written (`mlp_config.json`); a real model wants a
   ConfigureForSnitch default.
 - Broader ops (softmax/conv/layernorm) + non-16×16 shapes, each gated by xDSL coverage.
-- Double buffering is clean on the standalone cluster; on the gwaihir SoC it is blocked by
-  the parked Cheshire-AXI duplicate-R-last bug (single-buffered runs clean there).

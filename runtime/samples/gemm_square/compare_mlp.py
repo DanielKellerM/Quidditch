@@ -1,40 +1,57 @@
-#!/usr/bin/env python
-# Parse the mlp_harness YDUMP (f64 bit patterns) from a sim log and tolerance-check
-# the device output against the torch golden. Usage: compare_mlp.py <sim.log> <golden.npy>
+# Copyright 2026 ETH Zurich and University of Bologna.
+# Licensed under the Apache License, Version 2.0, see LICENSE for details.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Tolerance-check the mlp_harness device output (f64 bit-pattern YDUMP) against the
+# torch golden. Each sim log carries its own stride/offset in the YDUMP_BEGIN header;
+# several logs (one per offset) combine into full coverage. The offset is TRUSTED from
+# the header, never inferred from the data being validated (an oracle that relabels its
+# input to fit the golden could mask a systematic miscompile).
+# Usage: compare_mlp.py <golden.npy> <sim.log> [more sim.logs ...]
 import sys
+import re
 import numpy as np
 
-log = open(sys.argv[1]).read()
-golden = np.load(sys.argv[2]).astype(np.float64).ravel()
+args = sys.argv[1:]
+golden = None
+logs = []
+for a in args:
+    if a.endswith(".npy"):
+        golden = np.load(a).astype("<f8").ravel()
+    else:
+        logs.append(a)
+if golden is None or not logs:
+    print("usage: compare_mlp.py <golden.npy> <sim.log> [more...]")
+    sys.exit(2)
 
-beg = log.index("YDUMP_BEGIN")
-stride = 1
-import re
-m = re.search(r"stride=(\d+)", log[beg:beg + 40])
-if m:
-    stride = int(m.group(1))
-tail = log[beg:]
-end = tail.find("YDUMP_END")
-if end >= 0:
-    tail = tail[:end]
-hexes = [l.strip() for l in tail.splitlines()
-         if len(l.strip()) == 16 and all(c in "0123456789abcdef" for c in l.strip())]
-u = np.array([int(h, 16) for h in hexes], dtype=np.uint64)
-y = u.view(np.float64)
+filled = {}  # index -> device f64 value
+for path in logs:
+    with open(path) as f:
+        log = f.read()
+    m = re.search(r"YDUMP_BEGIN stride=(\d+) offset=(\d+)", log)
+    if not m:
+        print(f"ERROR: no parseable YDUMP_BEGIN header in {path}")
+        sys.exit(2)
+    stride, offset = int(m.group(1)), int(m.group(2))
+    tail = log[m.end():]
+    e = tail.find("YDUMP_END")
+    if e >= 0:
+        tail = tail[:e]
+    hexes = [l.strip() for l in tail.splitlines()
+             if len(l.strip()) == 16 and all(c in "0123456789abcdef" for c in l.strip())]
+    vals = np.array([int(h, 16) for h in hexes], dtype=np.uint64).view("<f8")
+    for k, v in enumerate(vals):
+        idx = offset + k * stride
+        if idx < golden.size:
+            filled[idx] = v
 
-golden = golden[::stride]  # device dumped every `stride`-th element
-n = min(y.size, golden.size)
-if y.size < golden.size:
-    print(f"NOTE: partial dump -- checking {n}/{golden.size} (stride={stride}) elements")
-else:
-    print(f"NOTE: stride={stride}, {n} elements spanning all rows")
-y, golden = y[:n], golden[:n]
-
-diff = np.abs(y - golden)
-rel = diff / np.maximum(1.0, np.abs(golden))
+idx = sorted(filled)
+dev = np.array([filled[i] for i in idx])
+gold = golden[idx]
+diff = np.abs(dev - gold)
+rel = diff / np.maximum(1.0, np.abs(gold))
 n_bad = int((rel > 1e-9).sum())
-print(f"elements={y.size} max_abs_err={diff.max():.3e} max_rel_err={rel.max():.3e} "
-      f"mismatches(>1e-9 rel)={n_bad} -> {'FAIL' if n_bad else 'SUCCESS'}")
-print("device[:4]=", np.array2string(y[:4], precision=6))
-print("golden[:4]=", np.array2string(golden[:4], precision=6))
+cov = len(idx)
+print(f"coverage={cov}/{golden.size} ({100 * cov // golden.size}%) max_abs_err={diff.max():.3e} "
+      f"max_rel_err={rel.max():.3e} mismatches(>1e-9 rel)={n_bad} -> {'FAIL' if n_bad else 'SUCCESS'}")
 sys.exit(1 if n_bad else 0)
