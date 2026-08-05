@@ -58,9 +58,11 @@ iree-run-module --module=mlp_cpu.vmfb --function=main \
 threading dispatch_0's output `h1` into dispatch_1's input. The compute cores run the
 real f64 kernels; the DM core (no fp ARITHMETIC) seeds the actual torch weights as f64
 bit patterns (`mlp_ref_bits.h`) via integer stores and dumps the fp output, which
-`compare_mlp.py` tolerance-checks against the torch golden (`mlp_golden.npy`). Build the
-`mlp_harness` target and run it on `snitch_cluster.vlt` (once per `YOFFSET` 0..3 for full
-coverage); then: `compare_mlp.py mlp_golden.npy <sim.log> [more sim.logs...]`.
+`compare_mlp.py` tolerance-checks against the torch golden (`mlp_golden.npy`). Each build
+covers one `YOFFSET` stride — the default `mlp_harness` target is offset 0 (64/256 elems);
+rebuild with `-DYOFFSET=1..3` for the other strides, then pass all four logs together for
+full coverage: `compare_mlp.py mlp_golden.npy <log0> <log1> <log2> <log3>` (a partial set
+reports INCOMPLETE, not SUCCESS).
 
 Verified on the Verilator single-cluster sim, all 8 compute cores identical per the
 per-hart traces: FPU (520 fp-offload ops/core), SSR (enable + config CSRs), FREP

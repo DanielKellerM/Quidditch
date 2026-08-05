@@ -46,12 +46,17 @@ for path in logs:
             filled[idx] = v
 
 idx = sorted(filled)
+if not idx:
+    print("FAIL: no parseable YDUMP hex values in any log")
+    sys.exit(2)
 dev = np.array([filled[i] for i in idx])
 gold = golden[idx]
 diff = np.abs(dev - gold)
 rel = diff / np.maximum(1.0, np.abs(gold))
 n_bad = int((rel > 1e-9).sum())
 cov = len(idx)
+# SUCCESS only on full coverage AND zero mismatches; partial coverage is INCOMPLETE, not a pass.
+status = "SUCCESS" if (n_bad == 0 and cov == golden.size) else ("FAIL" if n_bad else "INCOMPLETE")
 print(f"coverage={cov}/{golden.size} ({100 * cov // golden.size}%) max_abs_err={diff.max():.3e} "
-      f"max_rel_err={rel.max():.3e} mismatches(>1e-9 rel)={n_bad} -> {'FAIL' if n_bad else 'SUCCESS'}")
-sys.exit(1 if n_bad else 0)
+      f"max_rel_err={rel.max():.3e} mismatches(>1e-9 rel)={n_bad} -> {status}")
+sys.exit(0 if status == "SUCCESS" else 1)
