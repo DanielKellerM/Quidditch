@@ -73,8 +73,9 @@ the torch golden to **1.1e-16** (f64 last-bit), 0 mismatches across all 16 rows.
 
 Done via nimbus: `gen_qcs_offload_image.py` derives a QCS job (2 dispatches, h1 threaded
 between them) from the model's Flow IR, and the parametrized `qcs_replay` firmware replays
-it on the SoC RTL under PRELMODE=5. Result: `done=144/144 fail=0`, output `y` byte-exact vs
-the torch golden (max_abs_err 1.7e-16). Single-buffered on the SoC (double buffering is
+it on the SoC RTL under PRELMODE=5. Result: `done=144/144 fail=0`, and all 256 output `y`
+elements match the torch golden to f64 last-bit (max_abs_err 1.7e-16, 0/256 mismatches).
+Single-buffered on the SoC (double buffering is
 blocked there by the parked Cheshire-AXI duplicate-R-last bug; clean on the standalone cluster).
 
 ## Remaining
